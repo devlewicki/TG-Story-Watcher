@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+.dark {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;
+}
+
+/* Subtle ambient gradient for the whole app */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(600px 300px at 85% -10%, rgba(16, 185, 129, 0.08), transparent 60%),
+    radial-gradient(500px 300px at 0% 0%, rgba(99, 102, 241, 0.06), transparent 55%);
+}
+.dark body::before {
+  background:
+    radial-gradient(700px 350px at 85% -10%, rgba(16, 185, 129, 0.1), transparent 60%),
+    radial-gradient(600px 350px at 0% 0%, rgba(99, 102, 241, 0.08), transparent 55%);
+}
+
+/* Focus visibility */
+*:focus-visible {
+  outline: 2px solid rgba(16, 185, 129, 0.6);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Thin, modern scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.35) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- Places map pins ---- */
+.sw-pin {
+  color: #10b981;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.3));
+  transition: transform 120ms ease;
+}
+.sw-pin:hover {
+  transform: scale(1.12);
+}
+.sw-pin--selected {
+  color: #f59e0b;
+}
+.sw-pin__icon {
+  width: 30px;
+  height: 34px;
+  display: block;
+}
+
+/* Leaflet cluster overrides to match the theme */
+.marker-cluster-small {
+  background-color: rgba(16, 185, 129, 0.25) !important;
+}
+.marker-cluster-small div {
+  background-color: rgba(16, 185, 129, 0.85) !important;
+  color: #fff !important;
+}
+.marker-cluster-medium {
+  background-color: rgba(245, 158, 11, 0.25) !important;
+}
+.marker-cluster-medium div {
+  background-color: rgba(245, 158, 11, 0.9) !important;
+  color: #fff !important;
+}
+.marker-cluster-large {
+  background-color: rgba(99, 102, 241, 0.25) !important;
+}
+.marker-cluster-large div {
+  background-color: rgba(99, 102, 241, 0.9) !important;
+  color: #fff !important;
+}
+
+/* Smooth theme transition */
+body,
+body * {
+  transition-property: background-color, border-color, color;
+  transition-duration: 150ms;
+}
