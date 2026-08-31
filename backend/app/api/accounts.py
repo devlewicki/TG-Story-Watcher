@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,9 +15,7 @@ from .deps import require_api_token, current_user_id
 from .schemas import AccountOut, account_out
 
 logger = logging.getLogger("storywatcher.api.accounts")
-
 router = APIRouter(tags=["accounts"], dependencies=[Depends(require_api_token)])
-
 Db = Annotated[Session, Depends(get_db)]
 
 
@@ -44,21 +43,24 @@ async def _load(db: Db, account_id: int) -> TelegramAccount:
 
 @router.get("/accounts", response_model=list[AccountOut])
 def list_accounts(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
-    return [account_out(a) for a in db.query(TelegramAccount).filter(TelegramAccount.user_id == user_id).order_by(TelegramAccount.id).all()]
+    # A row with no session is historical-only and must never appear as an
+    # authorized Telegram profile.
+    return [account_out(a) for a in db.query(TelegramAccount).filter(TelegramAccount.user_id == user_id, TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value).order_by(TelegramAccount.id).all()]
 
 
 @router.post("/accounts", response_model=AccountResponse, status_code=201)
 def create_account(payload: AccountCreate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     existing = db.query(TelegramAccount).filter_by(phone=payload.phone).first()
     if existing is not None:
-        raise HTTPException(status_code=409, detail="account with this phone already exists")
-    acc = TelegramAccount(
-        phone=payload.phone,
-        user_id=user_id,
-        status=AccountStatus.DISCONNECTED.value,
-        api_id=payload.api_id,
-        api_hash=payload.api_hash,
-    )
+        if existing.user_id not in (None, user_id):
+            raise HTTPException(status_code=409, detail="account with this phone already exists")
+        existing.user_id = user_id
+        existing.status = AccountStatus.DISCONNECTED.value
+        existing.api_id = payload.api_id or existing.api_id
+        existing.api_hash = payload.api_hash or existing.api_hash
+        db.commit()
+        return AccountResponse(account_id=existing.id, status=existing.status)
+    acc = TelegramAccount(phone=payload.phone, user_id=user_id, status=AccountStatus.DISCONNECTED.value, api_id=payload.api_id, api_hash=payload.api_hash)
     db.add(acc)
     db.commit()
     db.refresh(acc)
@@ -67,23 +69,10 @@ def create_account(payload: AccountCreate, db: Db, user_id: Annotated[int, Depen
 
 @router.post("/accounts/{account_id}/start")
 async def start_account(account_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
-    """Start monitoring for the account.
-
-    The backend must never open the Telethon session file: the combined worker
-    process is its sole owner (SQLite sessions can't be shared across
-    processes), and connecting here would raise ``database is locked``. So this
-    only flips the monitoring flag — the worker connects and refreshes the
-    authorization status on its next cycle.
-    """
     acc = await _load(db, account_id)
     if acc.user_id != user_id: raise HTTPException(404, "account not found")
     acc.monitoring = True
-    if acc.status in (
-        AccountStatus.PAUSED.value,
-        AccountStatus.ERROR.value,
-        AccountStatus.DISCONNECTED.value,
-    ):
-        acc.status = AccountStatus.ACTIVE.value
+    if acc.status in (AccountStatus.PAUSED.value, AccountStatus.ERROR.value, AccountStatus.DISCONNECTED.value): acc.status = AccountStatus.ACTIVE.value
     db.commit()
     return {"id": acc.id, "status": acc.status, "monitoring": acc.monitoring, "authorized": None}
 
@@ -112,10 +101,13 @@ async def delete_account(account_id: int, db: Db, user_id: Annotated[int, Depend
     acc = await _load(db, account_id)
     if acc.user_id != user_id: raise HTTPException(404, "account not found")
     await cm.drop_client(account_id)
+    # Cancel only pending work for this Telegram profile. Historical Stories,
+    # views and analytics remain attached to the preserved account row.
+    from ..models import StoryQueue
+    db.query(StoryQueue).filter(StoryQueue.account_id == account_id).delete(synchronize_session=False)
     session_file = acc.session_path
-    # Keep the TelegramAccount row as the owner of historical analytics.
-    # Removing it would cascade-delete Stories, snapshots, viewers and
-    # reactions. Only revoke the Telegram authorization and detach the profile.
+    # Do not delete the row: Stories and analytics reference it. Mark it as
+    # disconnected so it is no longer an authorized Telegram profile.
     acc.session_path = None
     acc.status = AccountStatus.DISCONNECTED.value
     acc.monitoring = False
@@ -125,11 +117,7 @@ async def delete_account(account_id: int, db: Db, user_id: Annotated[int, Depend
     acc.last_name = None
     db.commit()
     if session_file:
-        import os
-
         for suffix in ("", "-journal", "-wal", "-shm"):
-            try:
-                os.remove(session_file + suffix)
-            except FileNotFoundError:
-                pass
-    return {"ok": True}
+            try: os.remove(session_file + suffix)
+            except FileNotFoundError: pass
+    return {"ok": True, "deleted": True, "account_id": account_id}

@@ -37,22 +37,22 @@ def get_credentials(account):
     return int(api_id), api_hash
 
 
+def _read_session(path: str):
+    if not os.path.isfile(path):
+        return StringSession()
+    with open(path, "rb") as file:
+        raw = file.read()
+    if raw.startswith(b"SQLite format 3"):
+        return path
+    try:
+        return StringSession(raw.decode("utf-8").strip())
+    except UnicodeDecodeError:
+        return StringSession()
+
+
 def build_client(account):
     api_id, api_hash = get_credentials(account)
-    session = account.session_path or _session_path(account.id)
-    # New sessions are stored as StringSession text. Keep compatibility with
-    # old SQLite session files by detecting the file header.
-    if os.path.isfile(session):
-        try:
-            with open(session, "rb") as file:
-                header = file.read(16)
-            if header.startswith(b"SQLite format 3"):
-                return TelegramClient(session, api_id, api_hash)
-            with open(session, "r", encoding="utf-8") as file:
-                return TelegramClient(StringSession(file.read().strip()), api_id, api_hash)
-        except (OSError, UnicodeDecodeError):
-            pass
-    return TelegramClient(StringSession(), api_id, api_hash)
+    return TelegramClient(_read_session(account.session_path or _session_path(account.id)), api_id, api_hash)
 
 
 async def get_client(account):
@@ -92,13 +92,18 @@ async def update_account_identity(account, client):
 
 
 async def start_account(account):
+    if not account.session_path:
+        account.status = AccountStatus.DISCONNECTED.value
+        account.monitoring = False
+        return None
     client = await connect(account)
     try:
         if await client.is_user_authorized():
             await update_account_identity(account, client)
             account.status = AccountStatus.ACTIVE.value
         else:
-            account.status = AccountStatus.AUTH_REQUIRED.value
+            account.status = AccountStatus.DISCONNECTED.value
+            account.monitoring = False
     except Exception:
         account.status = AccountStatus.ERROR.value
     return client
@@ -193,27 +198,16 @@ async def finish_login(phone: str, account):
             await login.connect()
         if not await login.is_user_authorized():
             raise ValueError("Telegram session is not authorized")
-
-        api_id, api_hash = get_credentials(account)
-        target = account.session_path or _session_path(account.id)
-        target_tmp = f"{target}.tmp"
-        # Persist the authenticated StringSession itself. A StringSession is
-        # text, so it is safe to store atomically and cannot be mistaken for a
-        # SQLite database by the worker.
         durable_string = login.session.save()
-        with open(target_tmp, "w", encoding="utf-8") as file:
+        target = account.session_path or _session_path(account.id)
+        tmp = f"{target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as file:
             file.write(durable_string)
-        os.replace(target_tmp, target)
-        await login.disconnect()
-
-        final = TelegramClient(StringSession(durable_string), api_id, api_hash)
-        await final.connect()
-        if not await final.is_user_authorized():
-            await final.disconnect()
-            raise ValueError("Telegram session is not authorized")
+        os.replace(tmp, target)
         account.session_path = target
-        _clients[account.id] = final
-        return final
+        await update_account_identity(account, login)
+        _clients[account.id] = login
+        return login
     except Exception:
         try:
             await login.disconnect()

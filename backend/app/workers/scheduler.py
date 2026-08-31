@@ -30,7 +30,9 @@ async def sync_account(account: TelegramAccount) -> int:
         # Re-load the account in this session: the caller may pass an object
         # detached from a different (already closed) session.
         acc = db.get(TelegramAccount, account.id)
-        if acc is None:
+        if acc is None or not acc.session_path:
+            return 0
+        if acc.status == AccountStatus.DISCONNECTED.value:
             return 0
 
         client = await cm.connect(acc)
@@ -39,7 +41,9 @@ async def sync_account(account: TelegramAccount) -> int:
             db.commit()
             return 0
         if not await client.is_user_authorized():
-            acc.status = AccountStatus.AUTH_REQUIRED.value
+            acc.status = AccountStatus.DISCONNECTED.value
+            acc.monitoring = False
+            acc.session_path = None
             db.commit()
             return 0
 
@@ -88,7 +92,7 @@ async def run_analytics_once() -> None:
         local = SessionLocal()
         try:
             acc = local.get(TelegramAccount, account.id)
-            if acc is not None:
+            if acc is not None and acc.session_path and acc.status not in (AccountStatus.DISCONNECTED.value, AccountStatus.AUTH_REQUIRED.value):
                 client = await cm.connect(acc)
                 if client.is_connected() and await client.is_user_authorized():
                     await collect_account(acc.id, local, client)
@@ -104,7 +108,7 @@ async def run_once() -> None:
     try:
         accounts = (
             db.query(TelegramAccount)
-            .filter(TelegramAccount.monitoring.is_(True))
+            .filter(TelegramAccount.monitoring.is_(True), TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value)
             .all()
         )
     finally:
@@ -145,7 +149,7 @@ async def run_discovery_once() -> None:
             svc.set("discovery", cfg)  # clear the flag
         accounts = (
             db.query(TelegramAccount)
-            .filter(TelegramAccount.monitoring.is_(True))
+            .filter(TelegramAccount.monitoring.is_(True), TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value)
             .all()
         )
     finally:
@@ -163,7 +167,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
     db = SessionLocal()
     try:
         acc = db.get(TelegramAccount, account.id)
-        if acc is None:
+        if acc is None or not acc.session_path or acc.status == AccountStatus.DISCONNECTED.value:
             return
         client = await cm.connect(acc)
         if not client.is_connected() or not await client.is_user_authorized():

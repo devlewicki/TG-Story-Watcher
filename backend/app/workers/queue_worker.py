@@ -116,12 +116,16 @@ def _due_items(db: Session, account_id: int, max_items: int) -> Sequence[StoryQu
 
 async def drain_queue(db: Session, account: TelegramAccount) -> None:
     """Process all currently-due queue entries for a single account."""
+    if not account.session_path or account.status == AccountStatus.DISCONNECTED.value:
+        return
     client = await cm.connect(account)
     if not client.is_connected():
         return
 
     if not await client.is_user_authorized():
-        account.status = AccountStatus.AUTH_REQUIRED.value
+        account.status = AccountStatus.DISCONNECTED.value
+        account.monitoring = False
+        account.session_path = None
         db.commit()
         return
 
@@ -194,7 +198,7 @@ async def run_once() -> int:
     try:
         accounts = (
             db.query(TelegramAccount)
-            .filter(TelegramAccount.monitoring.is_(True))
+            .filter(TelegramAccount.monitoring.is_(True), TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value)
             .all()
         )
         for account in accounts:
