@@ -81,6 +81,7 @@ async def run() -> None:
         if now - last_sync >= sync_interval:
             try:
                 await scheduler.run_once()
+                await scheduler.run_analytics_once()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("scheduler cycle error: %s", exc)
                 cycle_had_error = True

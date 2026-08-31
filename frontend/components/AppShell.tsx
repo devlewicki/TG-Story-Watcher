@@ -12,7 +12,13 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // Initial check (after mount, so localStorage is available).
-    setHasToken(!!getToken());
+    const token = getToken();
+    if (!token || !token.startsWith("user.")) {
+      if (token) localStorage.removeItem("storywatcher_api_token");
+      setHasToken(false);
+    } else {
+      setHasToken(true);
+    }
 
     const onUnauthorized = () => setHasToken(false);
     const onTokenSaved = () => setHasToken(!!getToken());

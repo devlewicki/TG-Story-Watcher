@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import AccountStatus, TelegramAccount
 from ..telegram import client_manager as cm
-from .deps import require_api_token
+from .deps import require_api_token, current_user_id
 from .schemas import AccountOut, account_out
 
 logger = logging.getLogger("storywatcher.api.accounts")
@@ -43,17 +43,18 @@ async def _load(db: Db, account_id: int) -> TelegramAccount:
 
 
 @router.get("/accounts", response_model=list[AccountOut])
-def list_accounts(db: Db):
-    return [account_out(a) for a in db.query(TelegramAccount).order_by(TelegramAccount.id).all()]
+def list_accounts(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    return [account_out(a) for a in db.query(TelegramAccount).filter(TelegramAccount.user_id == user_id).order_by(TelegramAccount.id).all()]
 
 
 @router.post("/accounts", response_model=AccountResponse, status_code=201)
-def create_account(payload: AccountCreate, db: Db):
+def create_account(payload: AccountCreate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     existing = db.query(TelegramAccount).filter_by(phone=payload.phone).first()
     if existing is not None:
         raise HTTPException(status_code=409, detail="account with this phone already exists")
     acc = TelegramAccount(
         phone=payload.phone,
+        user_id=user_id,
         status=AccountStatus.DISCONNECTED.value,
         api_id=payload.api_id,
         api_hash=payload.api_hash,
@@ -65,7 +66,7 @@ def create_account(payload: AccountCreate, db: Db):
 
 
 @router.post("/accounts/{account_id}/start")
-async def start_account(account_id: int, db: Db):
+async def start_account(account_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     """Start monitoring for the account.
 
     The backend must never open the Telethon session file: the combined worker
@@ -75,6 +76,7 @@ async def start_account(account_id: int, db: Db):
     authorization status on its next cycle.
     """
     acc = await _load(db, account_id)
+    if acc.user_id != user_id: raise HTTPException(404, "account not found")
     acc.monitoring = True
     if acc.status in (
         AccountStatus.PAUSED.value,
@@ -87,8 +89,9 @@ async def start_account(account_id: int, db: Db):
 
 
 @router.post("/accounts/{account_id}/pause")
-async def pause_account(account_id: int, db: Db):
+async def pause_account(account_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     acc = await _load(db, account_id)
+    if acc.user_id != user_id: raise HTTPException(404, "account not found")
     acc.status = AccountStatus.PAUSED.value
     acc.monitoring = False
     db.commit()
@@ -96,17 +99,19 @@ async def pause_account(account_id: int, db: Db):
 
 
 @router.post("/accounts/{account_id}/monitoring")
-async def set_monitoring(account_id: int, payload: MonitoringUpdate, db: Db):
+async def set_monitoring(account_id: int, payload: MonitoringUpdate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     acc = await _load(db, account_id)
+    if acc.user_id != user_id: raise HTTPException(404, "account not found")
     acc.monitoring = payload.monitoring
     db.commit()
     return {"id": acc.id, "monitoring": acc.monitoring}
 
 
 @router.delete("/accounts/{account_id}", response_model=dict)
-async def delete_account(account_id: int, db: Db):
+async def delete_account(account_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     acc = await _load(db, account_id)
-    cm.drop_client(account_id)
+    if acc.user_id != user_id: raise HTTPException(404, "account not found")
+    await cm.drop_client(account_id)
     session_file = acc.session_path
     db.delete(acc)
     db.commit()

@@ -9,8 +9,8 @@ from pydantic import BaseModel as _BM
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import AutomationRule
-from .deps import require_api_token
+from ..models import AutomationRule, TelegramAccount
+from .deps import require_api_token, current_user_id
 from .schemas import RuleOut, rule_out
 
 logger = logging.getLogger("storywatcher.api.rules")
@@ -30,15 +30,16 @@ class RuleIn(_BM):
 
 
 @router.get("", response_model=list[RuleOut])
-def list_rules(db: Db, account_id: int | None = None):
-    q = db.query(AutomationRule).order_by(AutomationRule.priority.desc(), AutomationRule.id.desc())
+def list_rules(db: Db, user_id: Annotated[int, Depends(current_user_id)], account_id: int | None = None):
+    q = db.query(AutomationRule).join(TelegramAccount).filter(TelegramAccount.user_id == user_id).order_by(AutomationRule.priority.desc(), AutomationRule.id.desc())
     if account_id is not None:
         q = q.filter(AutomationRule.account_id == account_id)
     return [rule_out(r) for r in q.all()]
 
 
 @router.post("", response_model=RuleOut, status_code=201)
-def create_rule(payload: RuleIn, db: Db):
+def create_rule(payload: RuleIn, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    if db.query(TelegramAccount).filter_by(id=payload.account_id, user_id=user_id).first() is None: raise HTTPException(404, "account not found")
     r = AutomationRule(
         account_id=payload.account_id,
         name=payload.name,
@@ -54,8 +55,8 @@ def create_rule(payload: RuleIn, db: Db):
 
 
 @router.patch("/{rule_id}", response_model=RuleOut)
-def patch_rule(rule_id: int, payload: RuleIn, db: Db):
-    r = db.get(AutomationRule, rule_id)
+def patch_rule(rule_id: int, payload: RuleIn, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
     r.name = payload.name
@@ -70,7 +71,7 @@ def patch_rule(rule_id: int, payload: RuleIn, db: Db):
 
 @router.delete("/{rule_id}")
 def delete_rule(rule_id: int, db: Db):
-    r = db.get(AutomationRule, rule_id)
+    r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
     db.delete(r)
@@ -80,7 +81,7 @@ def delete_rule(rule_id: int, db: Db):
 
 @router.post("/{rule_id}/enable")
 def enable_rule(rule_id: int, db: Db):
-    r = db.get(AutomationRule, rule_id)
+    r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
     r.enabled = True
@@ -90,7 +91,7 @@ def enable_rule(rule_id: int, db: Db):
 
 @router.post("/{rule_id}/disable")
 def disable_rule(rule_id: int, db: Db):
-    r = db.get(AutomationRule, rule_id)
+    r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
     r.enabled = False
@@ -101,7 +102,7 @@ def disable_rule(rule_id: int, db: Db):
 @router.post("/{rule_id}/test")
 def test_rule(rule_id: int, db: Db):
     """Lightweight validation test - verifies the rule config is well-formed JSON."""
-    r = db.get(AutomationRule, rule_id)
+    r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
     try:

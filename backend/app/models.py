@@ -52,10 +52,22 @@ class ViewStatus(str, enum.Enum):
     EXPIRED = "EXPIRED"
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_name: Mapped[str] = mapped_column(String(255))
+    last_name: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class TelegramAccount(Base):
     __tablename__ = "telegram_accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -96,6 +108,44 @@ class Story(Base):
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     raw_data: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StoryStatsSnapshot(Base):
+    __tablename__ = "story_stats_snapshots"
+    __table_args__ = (Index("ix_story_snapshot_story_collected", "story_id", "collected_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), index=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    views_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    forwards_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reactions_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class StoryViewer(Base):
+    __tablename__ = "story_viewers"
+    __table_args__ = (UniqueConstraint("story_id", "telegram_user_id", name="uq_story_viewer"), Index("ix_story_viewer_story_viewed", "story_id", "viewed_at"))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reaction: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class StoryReactionStat(Base):
+    __tablename__ = "story_reaction_stats"
+    __table_args__ = (UniqueConstraint("story_id", "reaction", name="uq_story_reaction"), Index("ix_story_reaction_story", "story_id"))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), index=True)
+    reaction: Mapped[str] = mapped_column(String(128))
+    count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class StoryQueue(Base):

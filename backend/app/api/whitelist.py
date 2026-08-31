@@ -8,8 +8,8 @@ from pydantic import BaseModel as _BM
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import WhitelistEntry
-from .deps import require_api_token
+from ..models import WhitelistEntry, TelegramAccount
+from .deps import require_api_token, current_user_id
 from .schemas import ListOut, list_out
 
 logger = logging.getLogger("storywatcher.api.whitelist")
@@ -27,15 +27,16 @@ class ListIn(_BM):
 
 
 @router.get("", response_model=list[ListOut])
-def list_whitelist(db: Db, account_id: int | None = None):
-    q = db.query(WhitelistEntry).order_by(WhitelistEntry.created_at.desc())
+def list_whitelist(db: Db, user_id: Annotated[int, Depends(current_user_id)], account_id: int | None = None):
+    q = db.query(WhitelistEntry).join(TelegramAccount).filter(TelegramAccount.user_id == user_id).order_by(WhitelistEntry.created_at.desc())
     if account_id is not None:
         q = q.filter(WhitelistEntry.account_id == account_id)
     return [list_out(e) for e in q.all()]
 
 
 @router.post("", response_model=ListOut, status_code=201)
-def add_whitelist(payload: ListIn, db: Db):
+def add_whitelist(payload: ListIn, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    if db.query(TelegramAccount).filter_by(id=payload.account_id, user_id=user_id).first() is None: raise HTTPException(404, "account not found")
     e = WhitelistEntry(
         account_id=payload.account_id,
         peer_id=payload.peer_id,
@@ -49,8 +50,8 @@ def add_whitelist(payload: ListIn, db: Db):
 
 
 @router.delete("/{entry_id}")
-def remove_whitelist(entry_id: int, db: Db):
-    e = db.get(WhitelistEntry, entry_id)
+def remove_whitelist(entry_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    e = db.query(WhitelistEntry).join(TelegramAccount).filter(WhitelistEntry.id == entry_id, TelegramAccount.user_id == user_id).first()
     if e is None:
         raise HTTPException(status_code=404, detail="entry not found")
     db.delete(e)

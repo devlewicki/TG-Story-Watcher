@@ -19,6 +19,7 @@ from ..services.settings_service import SettingsService
 from ..stories import discovery
 from ..stories.monitor import StoryMonitor, load_contacts_into
 from ..telegram import client_manager as cm
+from ..analytics.service import collect_account
 
 logger = logging.getLogger("storywatcher.scheduler")
 
@@ -75,6 +76,26 @@ async def sync_account(account: TelegramAccount) -> int:
         return 0
     finally:
         db.close()
+
+
+async def run_analytics_once() -> None:
+    db = SessionLocal()
+    try:
+        accounts = db.query(TelegramAccount).filter(TelegramAccount.status == AccountStatus.ACTIVE.value).all()
+    finally:
+        db.close()
+    for account in accounts:
+        local = SessionLocal()
+        try:
+            acc = local.get(TelegramAccount, account.id)
+            if acc is not None:
+                client = await cm.connect(acc)
+                if client.is_connected() and await client.is_user_authorized():
+                    await collect_account(acc.id, local, client)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("analytics sync account=%s failed: %s", account.id, exc)
+        finally:
+            local.close()
 
 
 async def run_once() -> None:
