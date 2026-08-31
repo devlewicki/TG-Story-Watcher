@@ -114,15 +114,19 @@ def _due_items(db: Session, account_id: int, max_items: int) -> Sequence[StoryQu
     )
 
 
+ACCOUNT_CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
+ACCOUNT_DRAIN_TIMEOUT = 300  # seconds to wait for full drain_queue per account
+
+
 async def drain_queue(db: Session, account: TelegramAccount) -> None:
     """Process all currently-due queue entries for a single account."""
     if not account.session_path or account.status == AccountStatus.DISCONNECTED.value:
         return
-    client = await cm.connect(account)
+    client = await asyncio.wait_for(cm.connect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
     if not client.is_connected():
         return
 
-    if not await client.is_user_authorized():
+    if not await asyncio.wait_for(client.is_user_authorized(), timeout=ACCOUNT_CONNECT_TIMEOUT):
         account.status = AccountStatus.DISCONNECTED.value
         account.monitoring = False
         # Do NOT clear session_path — preserve auth data for re-auth.
@@ -209,7 +213,7 @@ async def run_once() -> int:
                 continue
             for _attempt in range(3):
                 try:
-                    await drain_queue(db, account)
+                    await asyncio.wait_for(drain_queue(db, account), timeout=ACCOUNT_DRAIN_TIMEOUT)
                     # drain_queue may legitimately leave the account limited
                     # (daily budget exhausted -> PAUSED, hourly budget / flood wait
                     # -> FLOOD_WAIT). Don't overwrite those states back to ACTIVE.

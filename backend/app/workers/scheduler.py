@@ -13,6 +13,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
+CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
+
 from ..db import SessionLocal
 from ..models import AccountStatus, TelegramAccount
 from ..services.settings_service import SettingsService
@@ -33,12 +35,12 @@ async def sync_account(account: TelegramAccount) -> int:
                 return 0
             if acc.status == AccountStatus.DISCONNECTED.value:
                 return 0
-            client = await cm.connect(acc)
+            client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
             if not client.is_connected():
                 acc.status = AccountStatus.DISCONNECTED.value
                 db.commit()
                 return 0
-            if not await client.is_user_authorized():
+            if not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
                 acc.status = AccountStatus.DISCONNECTED.value
                 acc.monitoring = False
                 # Do NOT clear session_path — the file may still be
@@ -95,8 +97,8 @@ async def run_analytics_once() -> None:
         try:
             acc = local.get(TelegramAccount, account.id)
             if acc is not None and acc.session_path and acc.status not in (AccountStatus.DISCONNECTED.value, AccountStatus.AUTH_REQUIRED.value):
-                client = await cm.connect(acc)
-                if client.is_connected() and await client.is_user_authorized():
+                client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
+                if client.is_connected() and await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
                     await collect_account(acc.id, local, client)
         except Exception as exc:  # noqa: BLE001
             logger.warning("analytics sync account=%s failed: %s", account.id, exc)
@@ -207,8 +209,8 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         acc = db.get(TelegramAccount, account.id)
         if acc is None or not acc.session_path or acc.status == AccountStatus.DISCONNECTED.value:
             return
-        client = await cm.connect(acc)
-        if not client.is_connected() or not await client.is_user_authorized():
+        client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
+        if not client.is_connected() or not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
             return
         monitor = StoryMonitor(client, acc, db)
         lookup = monitor._load_sets()
@@ -216,7 +218,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         monitor._lookup = lookup
 
         limit = int(cfg.get("search_results_max", 50))
-        all_hashtags = cfg.get("hashtags") or []
+        all_hashtags = cfg.get("hashtags") or [] if cfg.get("hashtags_enabled", True) else []
         all_locations = list(cfg.get("locations") or [])
         # Rotate through hashtags: search at most `hashtag_budget` per cycle
         # to avoid flooding Telegram with too many SearchPosts requests.

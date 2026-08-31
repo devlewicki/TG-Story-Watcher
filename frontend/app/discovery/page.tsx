@@ -18,6 +18,7 @@ const PlacesMap = dynamic(() => import("@/components/PlacesMap"), {
 type DiscoveryConfig = {
   enabled: boolean;
   hashtags: string[];
+  hashtags_enabled: boolean;
   locations: string[];
   auto_add_places: boolean;
   search_interval: number;
@@ -74,6 +75,7 @@ export default function DiscoveryPage() {
   const [selectedOpen, setSelectedOpen] = useState(false);
   const [mapOpen, setMapOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
+  const [tagsExpanded, setTagsExpanded] = useState(false);
 
   const loadPlaces = () =>
     api
@@ -136,9 +138,12 @@ export default function DiscoveryPage() {
   };
 
   const addTag = () => {
-    const t = tagInput.trim().replace(/^#/, "").toLowerCase();
-    if (t && !cfg.hashtags.includes(t)) {
-      update({ hashtags: [...cfg.hashtags, t] });
+    const parts = tagInput.split(/[\s,;]+/).map(s => s.trim().replace(/^#/, "").toLowerCase()).filter(Boolean);
+    if (parts.length === 0) { setTagInput(""); return; }
+    const existing = new Set(cfg.hashtags);
+    const newTags = parts.filter(t => !existing.has(t));
+    if (newTags.length > 0) {
+      update({ hashtags: [...cfg.hashtags, ...newTags] });
     }
     setTagInput("");
   };
@@ -368,34 +373,79 @@ export default function DiscoveryPage() {
             subtitle="Истории, отмеченные этими тегами"
           />
           <div className="space-y-3 p-5">
-            <div className="flex flex-wrap gap-2">
-              {cfg.hashtags.length === 0 && (
-                <p className="text-sm text-slate-400">Хештеги пока не добавлены</p>
-              )}
-              {cfg.hashtags.map((t) => (
-                <span
-                  key={t}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-200"
-                >
-                  #{t}
-                  <button
-                    onClick={() => removeTag(t)}
-                    className="text-slate-400 transition-colors hover:text-red-500"
-                    title="Убрать"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
-                      <path d="M6 6l12 12M18 6L6 18" />
-                    </svg>
-                  </button>
-                </span>
-              ))}
+            {/* Toggle */}
+            <div className="flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3.5 dark:border-emerald-500/20 dark:bg-emerald-500/5">
+              <div>
+                <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Искать по хештегам
+                </div>
+                <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  Найдёт истории по заданным тегам и добавит в очередь
+                </div>
+              </div>
+              <Switch
+                checked={cfg.hashtags_enabled !== false}
+                onChange={(v) => update({ hashtags_enabled: v })}
+              />
             </div>
+            {/* Tags list — collapsible */}
+            {(() => {
+              const ROW_HEIGHT = 36;
+              const GAP = 8;
+              const ROWS = 3;
+              const collapsedMaxH = ROWS * (ROW_HEIGHT + GAP) - GAP;
+              const overflows = cfg.hashtags.length > 30;
+              return (
+                <>
+                  {cfg.hashtags.length > 0 && (
+                    <div className="relative">
+                      <div
+                        className="flex flex-wrap gap-2 overflow-hidden transition-all duration-300"
+                        style={{ maxHeight: overflows && !tagsExpanded ? collapsedMaxH : undefined }}
+                      >
+                        {cfg.hashtags.map((t) => (
+                          <span
+                            key={t}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                          >
+                            #{t}
+                            <button
+                              onClick={() => removeTag(t)}
+                              className="text-slate-400 transition-colors hover:text-red-500"
+                              title="Убрать"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
+                                <path d="M6 6l12 12M18 6L6 18" />
+                              </svg>
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                      {overflows && !tagsExpanded && (
+                        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-white dark:from-slate-900" />
+                      )}
+                    </div>
+                  )}
+                  {cfg.hashtags.length === 0 && (
+                    <p className="text-sm text-slate-400">Хештеги пока не добавлены</p>
+                  )}
+                  {overflows && (
+                    <button
+                      onClick={() => setTagsExpanded(!tagsExpanded)}
+                      className="text-xs font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+                    >
+                      {tagsExpanded ? `Свернуть` : `Показать все (${cfg.hashtags.length})`}
+                    </button>
+                  )}
+                </>
+              );
+            })()}
             <div className="flex gap-2">
               <input
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addTag()}
-                placeholder="Например: волхов"
+                placeholder="Волхов спб python docker (через пробел или запятую)"
                 className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               />
               <Button variant="secondary" onClick={addTag}>Добавить</Button>
