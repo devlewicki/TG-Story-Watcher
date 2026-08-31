@@ -113,12 +113,21 @@ async def delete_account(account_id: int, db: Db, user_id: Annotated[int, Depend
     if acc.user_id != user_id: raise HTTPException(404, "account not found")
     await cm.drop_client(account_id)
     session_file = acc.session_path
-    db.delete(acc)
+    # Keep the TelegramAccount row as the owner of historical analytics.
+    # Removing it would cascade-delete Stories, snapshots, viewers and
+    # reactions. Only revoke the Telegram authorization and detach the profile.
+    acc.session_path = None
+    acc.status = AccountStatus.DISCONNECTED.value
+    acc.monitoring = False
+    acc.telegram_user_id = None
+    acc.username = None
+    acc.first_name = None
+    acc.last_name = None
     db.commit()
     if session_file:
         import os
 
-        for suffix in ("", "-journal"):
+        for suffix in ("", "-journal", "-wal", "-shm"):
             try:
                 os.remove(session_file + suffix)
             except FileNotFoundError:
