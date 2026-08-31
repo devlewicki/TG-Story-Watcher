@@ -125,11 +125,11 @@ async def drain_queue(db: Session, account: TelegramAccount) -> None:
     if not await client.is_user_authorized():
         account.status = AccountStatus.DISCONNECTED.value
         account.monitoring = False
-        account.session_path = None
+        # Do NOT clear session_path — preserve auth data for re-auth.
         db.commit()
         return
 
-    svc = SettingsService(db)
+    svc = SettingsService(db, account.user_id)
     limits = svc.get("limits")
     per_min = int(limits.get("views_per_minute", 10))
     per_hour = int(limits.get("views_per_hour", 200))
@@ -207,30 +207,39 @@ async def run_once() -> int:
                 AccountStatus.BANNED_OR_RESTRICTED.value,
             ):
                 continue
-            try:
-                await drain_queue(db, account)
-                # drain_queue may legitimately leave the account limited
-                # (daily budget exhausted -> PAUSED, hourly budget / flood wait
-                # -> FLOOD_WAIT). Don't overwrite those states back to ACTIVE.
-                if account.status not in (
-                    AccountStatus.PAUSED.value,
-                    AccountStatus.FLOOD_WAIT.value,
-                    AccountStatus.AUTH_REQUIRED.value,
-                    AccountStatus.BANNED_OR_RESTRICTED.value,
-                ):
-                    account.status = AccountStatus.ACTIVE.value
-                db.commit()
-            except Exception as exc:  # noqa: BLE001
-                logger.error("drain_queue(%s) failed: %s", account.id, exc)
-                account.status = AccountStatus.ERROR.value
-                activity.log(
-                    f"worker drain failed: {exc}",
-                    event_type="worker_error",
-                    level="ERROR",
-                    account_id=account.id,
-                    db=db,
-                )
-                db.commit()
+            for _attempt in range(3):
+                try:
+                    await drain_queue(db, account)
+                    # drain_queue may legitimately leave the account limited
+                    # (daily budget exhausted -> PAUSED, hourly budget / flood wait
+                    # -> FLOOD_WAIT). Don't overwrite those states back to ACTIVE.
+                    if account.status not in (
+                        AccountStatus.PAUSED.value,
+                        AccountStatus.FLOOD_WAIT.value,
+                        AccountStatus.AUTH_REQUIRED.value,
+                        AccountStatus.BANNED_OR_RESTRICTED.value,
+                    ):
+                        account.status = AccountStatus.ACTIVE.value
+                    db.commit()
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    is_locked = "database is locked" in str(exc).lower()
+                    if is_locked and _attempt < 2:
+                        logger.warning("drain_queue(%s) database locked, retrying (attempt %d)", account.id, _attempt + 1)
+                        db.rollback()
+                        await asyncio.sleep(2 ** _attempt)
+                        continue
+                    logger.error("drain_queue(%s) failed: %s", account.id, exc)
+                    account.status = AccountStatus.ERROR.value
+                    activity.log(
+                        f"worker drain failed: {exc}",
+                        event_type="worker_error",
+                        level="ERROR",
+                        account_id=account.id,
+                        db=db,
+                    )
+                    db.commit()
+                    break
     finally:
         db.close()
     return total

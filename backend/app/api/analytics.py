@@ -1,12 +1,10 @@
 from __future__ import annotations
 from datetime import datetime,timedelta,timezone
 from typing import Annotated
-from fastapi import APIRouter,BackgroundTasks,Depends,HTTPException,Query
+from fastapi import APIRouter,Depends,HTTPException,Query
 from sqlalchemy.orm import Session
-from ..analytics.service import collect_account
 from ..db import SessionLocal,get_db
 from ..models import Story,StoryReactionStat,StoryStatsSnapshot,StoryViewer,TelegramAccount
-from ..telegram import client_manager as cm
 from .deps import require_api_token,current_user_id
 router=APIRouter(prefix="/analytics",tags=["analytics"],dependencies=[Depends(require_api_token)])
 Db=Annotated[Session,Depends(get_db)]
@@ -45,11 +43,11 @@ def events(db:Db,user_id:Annotated[int,Depends(current_user_id)],limit:int=Query
 def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Query(30,ge=1,le=3650)):
  since=datetime.now(timezone.utc)-timedelta(days=days); q=db.query(Story).join(TelegramAccount).filter(Story.source=="analytics",TelegramAccount.user_id==user_id).filter((Story.published_at>=since)|(Story.published_at.is_(None))); a=[_summary(db,s) for s in q.all()]; return {"stories":len(a),"views":sum(x["views"] or 0 for x in a),"known_viewers":sum(x["known_viewers"] for x in a),"reactions":sum(x["reactions"] or 0 for x in a),"forwards":sum(x["forwards"] or 0 for x in a),"average_views":sum(x["views"] or 0 for x in a)/len(a) if a else 0,"average_er":sum(x["er"] or 0 for x in a)/len(a) if a else 0,"top_stories":sorted(a,key=lambda x:x["views"] or 0,reverse=True)[:10]}
 @router.post("/sync")
-async def sync(account_id:int,background_tasks:BackgroundTasks,db:Db,user_id:Annotated[int,Depends(current_user_id)]):
+async def sync(account_id:int,db:Db,user_id:Annotated[int,Depends(current_user_id)]):
  if not db.query(TelegramAccount).filter_by(id=account_id,user_id=user_id).first():raise HTTPException(404,"account not found")
- async def run():
-  local=SessionLocal()
-  try:
-   acc=local.get(TelegramAccount,account_id); await collect_account(account_id,local,await cm.connect(acc))
-  finally:local.close()
- background_tasks.add_task(run); return {"ok":True,"status":"queued","account_id":account_id}
+ # Analytics sync is handled by the worker process which owns the Telegram
+ # client.  Opening a second client from the backend process would conflict
+ # on the shared SQLite session file ("database is locked").  The worker
+ # runs analytics every 30s — this endpoint just confirms the account exists
+ # and the worker will pick it up on the next cycle.
+ return {"ok":True,"status":"queued","account_id":account_id}

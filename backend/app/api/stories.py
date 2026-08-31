@@ -132,7 +132,7 @@ def view_story(story_id: int, db: Db, user_id: Annotated[int, Depends(current_us
         return QueueItemOut(**(item_dict(existing, s)))
     import random
 
-    svc = SettingsService(db)
+    svc = SettingsService(db, user_id)
     min_d = int(svc.get("view").get("min_delay", 0))
     max_d = max(int(svc.get("view").get("max_delay", 10)), min_d)
     delay = random.randint(min_d, max_d)

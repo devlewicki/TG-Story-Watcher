@@ -113,7 +113,7 @@ async def process_queue_item(
     # The view already succeeded; a failed reaction must not fail the item.
     like_emoji = None
     try:
-        view_cfg = SettingsService(db).get("view")
+        view_cfg = SettingsService(db, account.user_id).get("view")
         if view_cfg.get("auto_like"):
             like_emoji = (view_cfg.get("like_emoji") or "👍").strip() or "👍"
     except Exception as exc:  # noqa: BLE001

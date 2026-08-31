@@ -64,6 +64,7 @@ async def run() -> None:
 
     last_sync = 0.0
     consecutive_errors = 0
+    discovery_task: asyncio.Task | None = None
 
     while True:
         _write_heartbeat()  # mark liveness at the top so healthcheck doesn't false-positive
@@ -87,12 +88,16 @@ async def run() -> None:
                 cycle_had_error = True
             last_sync = now
 
-        # 3) Global story discovery (hashtag/geo) - self-gated by its own interval.
-        try:
-            await scheduler.run_discovery_once()
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("discovery cycle error: %s", exc)
-            cycle_had_error = True
+        # 3) Global story discovery — run as a background task so it doesn't
+        #    block queue processing (discovery can take minutes due to
+        #    FloodWait from Telegram's SearchPosts rate limit).
+        if discovery_task is None or discovery_task.done():
+            async def _run_discovery():
+                try:
+                    await scheduler.run_discovery_once()
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("discovery cycle error: %s", exc)
+            discovery_task = asyncio.create_task(_run_discovery())
 
         # --- Watchdog bookkeeping ---
         if cycle_had_error:

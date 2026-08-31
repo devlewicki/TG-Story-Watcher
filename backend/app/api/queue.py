@@ -79,7 +79,7 @@ def retry_item(item_id: int, db: Db, user_id: Annotated[int, Depends(current_use
 
     from ..services.settings_service import SettingsService
 
-    svc = SettingsService(db)
+    svc = SettingsService(db, user_id)
     min_d = int(svc.get("view").get("min_delay", 0))
     max_d = max(int(svc.get("view").get("max_delay", 10)), min_d)
     item.status = "PENDING"

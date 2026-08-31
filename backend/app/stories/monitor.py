@@ -87,7 +87,7 @@ class StoryMonitor:
 
     # ---- filtering helpers ----
     def _load_sets(self):
-        s = SettingsService(self.db)
+        s = SettingsService(self.db, self.account.user_id)
         return FiltersLookup.load(self.db, self.account.id, s)
 
     def _load_skipped_set(self) -> set[tuple[int, int]]:
@@ -119,7 +119,7 @@ class StoryMonitor:
         return out
 
     def build_engine(self):
-        s = SettingsService(self.db)
+        s = SettingsService(self.db, self.account.user_id)
         # Reuse a lookup that already has contacts populated (set by the
         # scheduler before the burst sync); otherwise load a fresh one.
         fl = getattr(self, "_lookup", None)
@@ -251,7 +251,7 @@ class StoryMonitor:
         )
         if existing is not None:
             return
-        s = SettingsService(self.db)
+        s = SettingsService(self.db, self.account.user_id)
         min_delay = s.get("view").get("min_delay", 20)
         max_delay = s.get("view").get("max_delay", 120)
         import random
@@ -556,7 +556,7 @@ class FiltersLookup:
 # seconds. GetContacts returns the whole list on every call (here: 800+ entries)
 # and is easy to flood-wait, yet the worker calls it on every sync and discovery
 # cycle — so cache it and only re-fetch when stale.
-_CONTACTS_TTL = 300.0
+_CONTACTS_TTL = 1800.0  # 30 minutes — GetContacts triggers FloodWait
 _contacts_cache: dict[int, tuple[float, set[int], set[int]]] = {}
 
 

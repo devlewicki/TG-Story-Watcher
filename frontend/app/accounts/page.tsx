@@ -21,14 +21,14 @@ export default function AccountsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-xl font-semibold">Аккаунты</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">Подключённые Telegram-аккаунты</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={refresh}>↻ Обновить</Button>
-          <Button onClick={() => setShowModal(true)}>＋ Добавить аккаунт</Button>
+          <Button onClick={() => setShowModal(true)}>＋ Добавить</Button>
           <Button variant="danger" onClick={() => { clearToken(); window.dispatchEvent(new Event("storywatcher:unauthorized")); }}>Выйти</Button>
         </div>
       </div>
@@ -107,7 +107,7 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
         <span>Был в сети {timeAgo(account.last_seen_at)}</span>
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
         {account.status !== "ACTIVE" ? (
           <Button variant="secondary" disabled={busy !== null} onClick={() => act("start")}>
             {busy === "start" ? "…" : "▶ Запустить"}
@@ -124,7 +124,7 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
         >
           Мониторинг {account.monitoring ? "ВЫКЛ" : "ВКЛ"}
         </Button>
-        <Button variant="danger" disabled={busy !== null} onClick={remove} className="ml-auto">
+        <Button variant="danger" disabled={busy !== null} onClick={remove} className="col-span-2 sm:col-span-1 sm:ml-auto">
           {busy === "delete" ? "…" : "Удалить"}
         </Button>
       </div>

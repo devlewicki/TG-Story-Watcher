@@ -271,7 +271,7 @@ export default function DiscoveryPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-xl font-semibold">Поиск историй</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
@@ -297,7 +297,7 @@ export default function DiscoveryPage() {
             {saveLabel}
           </span>
           <Button onClick={search} disabled={busy}>
-            {busy ? "Запускаем…" : "Запустить поиск"}
+            {busy ? "Запускаем…" : "Поиск"}
           </Button>
         </div>
       </div>
