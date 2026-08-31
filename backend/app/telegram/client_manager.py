@@ -39,7 +39,20 @@ def get_credentials(account):
 
 def build_client(account):
     api_id, api_hash = get_credentials(account)
-    return TelegramClient(account.session_path or _session_path(account.id), api_id, api_hash)
+    session = account.session_path or _session_path(account.id)
+    # New sessions are stored as StringSession text. Keep compatibility with
+    # old SQLite session files by detecting the file header.
+    if os.path.isfile(session):
+        try:
+            with open(session, "rb") as file:
+                header = file.read(16)
+            if header.startswith(b"SQLite format 3"):
+                return TelegramClient(session, api_id, api_hash)
+            with open(session, "r", encoding="utf-8") as file:
+                return TelegramClient(StringSession(file.read().strip()), api_id, api_hash)
+        except (OSError, UnicodeDecodeError):
+            pass
+    return TelegramClient(StringSession(), api_id, api_hash)
 
 
 async def get_client(account):
@@ -184,11 +197,10 @@ async def finish_login(phone: str, account):
         api_id, api_hash = get_credentials(account)
         target = account.session_path or _session_path(account.id)
         target_tmp = f"{target}.tmp"
-        durable = TelegramClient(StringSession(), api_id, api_hash)
-        durable.session.set_dc(login.session.dc_id, login.session.server_address, login.session.port)
-        durable.session.auth_key = login.session.auth_key
-        durable.session.save()
-        durable_string = durable.session.save()
+        # Persist the authenticated StringSession itself. A StringSession is
+        # text, so it is safe to store atomically and cannot be mistaken for a
+        # SQLite database by the worker.
+        durable_string = login.session.save()
         with open(target_tmp, "w", encoding="utf-8") as file:
             file.write(durable_string)
         os.replace(target_tmp, target)
