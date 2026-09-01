@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import ActivityLog, StoryView
-from .deps import require_api_token
+from ..models import ActivityLog, StoryView, TelegramAccount
+from .deps import require_api_token, current_user_id
 from .schemas import ActivityOut, ViewOut, activity_out
 
 logger = logging.getLogger("storywatcher.api.history")
@@ -35,18 +35,19 @@ def _view_out(v) -> dict:
 
 
 @router.get("/views/count")
-def count_views(db: Db):
-    return {"count": db.query(StoryView).count()}
+def count_views(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    return {"count": db.query(StoryView).join(TelegramAccount).filter(TelegramAccount.user_id == user_id).count()}
 
 
 @router.get("/activity/count")
-def count_activity(db: Db):
-    return {"count": db.query(ActivityLog).count()}
+def count_activity(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    return {"count": db.query(ActivityLog).join(TelegramAccount, ActivityLog.account_id == TelegramAccount.id).filter(TelegramAccount.user_id == user_id).count()}
 
 
 @router.get("/views", response_model=list[ViewOut])
 def list_views(
     db: Db,
+    user_id: Annotated[int, Depends(current_user_id)],
     account_id: int | None = None,
     peer_id: int | None = None,
     status: str | None = None,
@@ -54,7 +55,7 @@ def list_views(
     limit: int = Query(200, le=1000),
     offset: int = 0,
 ):
-    q = db.query(StoryView).order_by(StoryView.viewed_at.desc())
+    q = db.query(StoryView).join(TelegramAccount).filter(TelegramAccount.user_id == user_id).order_by(StoryView.viewed_at.desc())
     if account_id is not None:
         q = q.filter(StoryView.account_id == account_id)
     if peer_id is not None:
@@ -81,13 +82,14 @@ def list_views(
 @router.get("/activity", response_model=list[ActivityOut])
 def list_activity(
     db: Db,
+    user_id: Annotated[int, Depends(current_user_id)],
     account_id: int | None = None,
     event_type: str | None = None,
     level: str | None = None,
     limit: int = Query(200, le=1000),
     offset: int = 0,
 ):
-    q = db.query(ActivityLog).order_by(ActivityLog.created_at.desc())
+    q = db.query(ActivityLog).join(TelegramAccount, ActivityLog.account_id == TelegramAccount.id).filter(TelegramAccount.user_id == user_id).order_by(ActivityLog.created_at.desc())
     if account_id is not None:
         q = q.filter(ActivityLog.account_id == account_id)
     if event_type is not None:

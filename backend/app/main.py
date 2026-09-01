@@ -6,8 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import auth, settings, dashboard, discovery, accounts, rules, whitelist, blacklist
-from .api import stories, queue, history
+from .api import auth, user_auth, settings, dashboard, discovery, accounts, rules, whitelist, blacklist
+from .api import stories, queue, history, analytics
 from .config import get_settings
 from .db import init_db
 
@@ -49,6 +49,7 @@ def health() -> dict:
 # Routers grouped by domain. Auth-protected routers add the token dependency
 # in the dependency_overrides-friendly way via the router's dependencies list.
 app.include_router(auth.router, prefix="/api")
+app.include_router(user_auth.router, prefix="/api")
 app.include_router(accounts.router, prefix="/api")
 app.include_router(stories.router, prefix="/api")
 app.include_router(queue.router, prefix="/api")
@@ -59,3 +60,4 @@ app.include_router(history.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(discovery.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")

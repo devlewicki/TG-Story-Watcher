@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { api, type Account } from "@/lib/api";
+import { api, type Account, clearToken } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { Badge, Button, Card, CardHeader, Empty, ErrorBanner, Spinner } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
@@ -29,6 +29,7 @@ export default function AccountsPage() {
         <div className="flex gap-2">
           <Button variant="secondary" onClick={refresh}>↻ Обновить</Button>
           <Button onClick={() => setShowModal(true)}>＋ Добавить аккаунт</Button>
+          <Button variant="danger" onClick={() => { clearToken(); window.dispatchEvent(new Event("storywatcher:unauthorized")); }}>Выйти</Button>
         </div>
       </div>
 
@@ -42,16 +43,15 @@ export default function AccountsPage() {
         </div>
       )}
 
-      {showModal && <AuthModal onClose={() => setShowModal(false)} onDone={() => { setShowModal(false); refresh(); }} />}
+      {showModal && <AuthModal onClose={() => setShowModal(false)} onDone={() => { setShowModal(false); refresh(); window.dispatchEvent(new Event("storywatcher:account-updated")); }} />}
     </div>
   );
 }
 
 function AccountCard({ account, onChanged }: { account: Account; onChanged: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
-  const name = account.first_name
-    ? `${account.first_name} ${account.last_name ?? ""}`.trim()
-    : account.username ?? account.phone;
+  const fullName = [account.first_name, account.last_name].filter(Boolean).join(" ");
+  const name = fullName || account.username || account.phone;
 
   const act = async (kind: "start" | "pause") => {
     setBusy(kind);
@@ -94,6 +94,7 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
           <div className="font-medium text-slate-900 dark:text-slate-50">{name}</div>
           <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             {account.phone}
+            {fullName ? ` · ${fullName}` : ""}
             {account.username ? ` · @${account.username}` : ""}
             {account.telegram_user_id ? ` · id ${account.telegram_user_id}` : ""}
           </div>

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..services.settings_service import SettingsService
-from .deps import require_api_token
+from .deps import require_api_token, current_user_id
 
 logger = logging.getLogger("storywatcher.api.settings")
 
@@ -24,14 +24,14 @@ class SettingsUpdate(_BM):
 
 
 @router.get("")
-def get_settings(db: Db):
-    svc = SettingsService(db)
+def get_settings(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    svc = SettingsService(db, user_id)
     return svc.get_all()
 
 
 @router.post("")
-def update_settings(payload: SettingsUpdate, db: Db):
-    svc = SettingsService(db)
+def update_settings(payload: SettingsUpdate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    svc = SettingsService(db, user_id)
     if payload.section not in svc.DEFAULTS:
         return {"ok": False, "error": f"unknown section: {payload.section}"}
     merged = svc.set(payload.section, payload.value)
@@ -39,7 +39,7 @@ def update_settings(payload: SettingsUpdate, db: Db):
 
 
 @router.put("")
-def put_settings(values: dict, db: Db):
-    svc = SettingsService(db)
+def put_settings(values: dict, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    svc = SettingsService(db, user_id)
     result = svc.set_all(values)
     return {"ok": True, "settings": result}

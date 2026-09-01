@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import ActivityLog, Story, StoryQueue, StoryView
+from ..models import ActivityLog, Story, StoryQueue, StoryView, TelegramAccount
 from ..services.settings_service import SettingsService
-from .deps import require_api_token
+from .deps import require_api_token, current_user_id
 from .schemas import QueueItemOut, StoryOut, story_out
 
 logger = logging.getLogger("storywatcher.api.stories")
@@ -24,13 +24,14 @@ Db = Annotated[Session, Depends(get_db)]
 @router.get("/stories", response_model=list[StoryOut])
 def list_stories(
     db: Db,
+    user_id: Annotated[int, Depends(current_user_id)],
     account_id: int | None = None,
     peer_id: int | None = None,
     source: str | None = None,
     limit: int = Query(100, le=500),
     offset: int = 0,
 ):
-    q = db.query(Story)
+    q = db.query(Story).join(TelegramAccount, Story.account_id == TelegramAccount.id).filter(TelegramAccount.user_id == user_id)
     if account_id is not None:
         q = q.filter(Story.account_id == account_id)
     if peer_id is not None:
@@ -103,22 +104,22 @@ def list_stories(
 
 
 @router.get("/stories/count")
-def count_stories(db: Db):
-    """Total number of stored stories."""
-    return {"count": db.query(Story).count()}
+def count_stories(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    """Total number of stored stories for the current user."""
+    return {"count": db.query(Story).join(TelegramAccount).filter(TelegramAccount.user_id == user_id).count()}
 
 
 @router.get("/stories/{story_id}", response_model=StoryOut)
-def get_story(story_id: int, db: Db):
-    s = db.get(Story, story_id)
+def get_story(story_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    s = db.query(Story).join(TelegramAccount).filter(Story.id == story_id, TelegramAccount.user_id == user_id).first()
     if s is None:
         raise HTTPException(status_code=404, detail="story not found")
     return story_out(s)
 
 
 @router.post("/stories/{story_id}/view", response_model=QueueItemOut)
-def view_story(story_id: int, db: Db):
-    s = db.get(Story, story_id)
+def view_story(story_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    s = db.query(Story).join(TelegramAccount).filter(Story.id == story_id, TelegramAccount.user_id == user_id).first()
     if s is None:
         raise HTTPException(status_code=404, detail="story not found")
     existing = (
@@ -148,8 +149,8 @@ def view_story(story_id: int, db: Db):
 
 
 @router.post("/stories/{story_id}/skip")
-def skip_story(story_id: int, db: Db):
-    s = db.get(Story, story_id)
+def skip_story(story_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    s = db.query(Story).join(TelegramAccount).filter(Story.id == story_id, TelegramAccount.user_id == user_id).first()
     if s is None:
         raise HTTPException(status_code=404, detail="story not found")
     item = db.query(StoryQueue).filter_by(account_id=s.account_id, story_id=s.id).first()
