@@ -48,6 +48,7 @@ async def sync_account(account: TelegramAccount) -> int:
                 # auth data and makes the account disappear.
                 db.commit()
                 return 0
+            await cm.update_account_identity(acc, client)
             monitor = StoryMonitor(client, acc, db)
             lookup = monitor._load_sets()
             await load_contacts_into(client, acc, lookup)
@@ -99,6 +100,8 @@ async def run_analytics_once() -> None:
             if acc is not None and acc.session_path and acc.status not in (AccountStatus.DISCONNECTED.value, AccountStatus.AUTH_REQUIRED.value):
                 client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
                 if client.is_connected() and await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
+                    await cm.update_account_identity(acc, client)
+                    local.commit()
                     await collect_account(acc.id, local, client)
         except Exception as exc:  # noqa: BLE001
             logger.warning("analytics sync account=%s failed: %s", account.id, exc)
@@ -212,6 +215,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
         if not client.is_connected() or not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
             return
+        await cm.update_account_identity(acc, client)
         monitor = StoryMonitor(client, acc, db)
         lookup = monitor._load_sets()
         await load_contacts_into(client, acc, lookup)

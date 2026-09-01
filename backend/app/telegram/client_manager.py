@@ -196,6 +196,11 @@ async def update_account_identity(account, client):
         account.first_name = getattr(me, "first_name", None)
         account.last_name = getattr(me, "last_name", None)
         account.phone = getattr(me, "phone", None) or account.phone
+        new_premium = bool(getattr(me, "premium", False))
+        logger.info("update_account_identity phone=%s me.premium=%s me.id=%s", account.phone, getattr(me, "premium", "MISSING"), getattr(me, "id", None))
+        if account.is_premium != new_premium:
+            logger.info("Account %s (%s) premium status changed: %s -> %s", account.id, account.phone, account.is_premium, new_premium)
+        account.is_premium = new_premium
 
 
 async def start_account(account):

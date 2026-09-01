@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, type Account } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { Button, Card, CardHeader, Empty, ErrorBanner, Spinner, StatCard } from "@/components/ui";
 
@@ -12,10 +12,39 @@ type RecentEvent = { type: "view" | "reaction"; story_id: number; telegram_story
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(3650);
+  const accounts = useFetch<Account[]>((signal) => api.get<Account[]>("/accounts", signal), []);
   const { data, loading, error, refresh } = useFetch<Overview>((signal) => api.get(`/analytics/overview?days=${days}`, signal), [days]);
   const recent = useFetch<RecentEvent[]>((signal) => api.get(`/analytics/recent-events?limit=30`, signal), []);
   const [syncing, setSyncing] = useState(false);
-  const sync = async () => { setSyncing(true); try { const accounts = await api.get<{ id: number }[]>("/accounts"); for (const account of accounts) await api.post("/analytics/sync?account_id=" + account.id); await refresh(); } finally { setSyncing(false); } };
+  const sync = async () => { setSyncing(true); try { const accs = await api.get<{ id: number }[]>("/accounts"); for (const acc of accs) await api.post("/analytics/sync?account_id=" + acc.id); await refresh(); } finally { setSyncing(false); } };
+  if (accounts.loading) return <Spinner />;
+  if (accounts.error) return <ErrorBanner message={accounts.error} />;
+  const hasPremium = accounts.data?.some((a) => a.is_premium) ?? false;
+  if (!hasPremium) {
+    return (
+      <div className="space-y-5">
+        <div>
+          <h1 className="text-xl font-semibold">Аналитика историй</h1>
+        </div>
+        <Card className="p-6">
+          <div className="flex flex-col items-center text-center">
+            <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 text-2xl dark:bg-amber-500/15">
+              👑
+            </div>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+              Требуется Telegram Premium
+            </h2>
+            <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
+              Анализ ваших историй (просмотры, зрители, реакции, пересылки) доступен только для аккаунтов с подпиской Telegram Premium.
+            </p>
+            <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
+              Приобретите подписку в Telegram или воспользуйтесь разделом <Link href="/stories" className="font-medium text-emerald-600 hover:underline dark:text-emerald-400">Просмотры историй</Link> для мониторинга и автопросмотра.
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
   if (loading) return <Spinner />;
   if (error) return <ErrorBanner message={error} />;
   if (!data) return <Empty label="Нет аналитики" />;
