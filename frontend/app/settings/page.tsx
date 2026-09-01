@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useTranslation } from "@/lib/i18n";
 import { Card, CardHeader, ErrorBanner, Spinner, Switch } from "@/components/ui";
 
 type SettingsMap = Record<string, Record<string, unknown>>;
@@ -28,162 +29,167 @@ type SectionDef = {
   fields: Record<string, FieldDef>;
 };
 
-const SECTIONS: Record<string, SectionDef> = {
-  general: {
-    title: "Общие",
-    description: "Язык интерфейса, тема и поведение при запуске",
-    icon: "⚙️",
-    fields: {
-      language: {
-        label: "Язык",
-        type: "select",
-        options: [
-          { value: "ru", label: "Русский" },
-          { value: "en", label: "English" },
-        ],
-      },
-      timezone: {
-        label: "Часовой пояс",
-        description: "Например: Europe/Moscow, UTC",
-        type: "text",
-        command: {
-          label: "Автоопределить",
-          detect: () =>
-            Intl.DateTimeFormat().resolvedOptions().timeZone ?? "",
+// The discovery section is managed on its own page (Story Search).
+const HIDDEN_SECTIONS = new Set(["discovery"]);
+
+function useSections(): Record<string, SectionDef> {
+  const { t } = useTranslation();
+  return {
+    general: {
+      title: t("settings.sections.general.title"),
+      description: t("settings.sections.general.description"),
+      icon: "⚙️",
+      fields: {
+        language: {
+          label: t("settings.sections.general.fields.language.label"),
+          type: "select",
+          options: [
+            { value: "ru", label: "Русский" },
+            { value: "en", label: "English" },
+          ],
+        },
+        timezone: {
+          label: t("settings.sections.general.fields.timezone.label"),
+          description: t("settings.sections.general.fields.timezone.description"),
+          type: "text",
+          command: {
+            label: t("settings.sections.general.fields.timezone.autoDetect"),
+            detect: () =>
+              Intl.DateTimeFormat().resolvedOptions().timeZone ?? "",
+          },
+        },
+        theme: {
+          label: t("settings.sections.general.fields.theme.label"),
+          type: "select",
+          options: [
+            { value: "dark", label: t("settings.sections.general.fields.theme.dark") },
+            { value: "light", label: t("settings.sections.general.fields.theme.light") },
+          ],
+        },
+        autostart: {
+          label: t("settings.sections.general.fields.autostart.label"),
+          description: t("settings.sections.general.fields.autostart.description"),
+          type: "bool",
         },
       },
-      theme: {
-        label: "Тема",
-        type: "select",
-        options: [
-          { value: "dark", label: "Тёмная" },
-          { value: "light", label: "Светлая" },
-        ],
-      },
-      autostart: {
-        label: "Автозапуск",
-        description: "Запускать автоматизацию при старте приложения",
-        type: "bool",
+    },
+    telegram: {
+      title: t("settings.sections.telegram.title"),
+      description: t("settings.sections.telegram.description"),
+      icon: "✈️",
+      fields: {
+        api_id: { label: t("settings.sections.telegram.fields.apiId.label"), type: "text", sensitive: true },
+        api_hash: { label: t("settings.sections.telegram.fields.apiHash.label"), type: "text", sensitive: true },
+        reconnect: {
+          label: t("settings.sections.telegram.fields.reconnect.label"),
+          description: t("settings.sections.telegram.fields.reconnect.description"),
+          type: "bool",
+        },
       },
     },
-  },
-  telegram: {
-    title: "Telegram",
-    description: "API-доступ и поведение соединения",
-    icon: "✈️",
-    fields: {
-      api_id: { label: "API ID", type: "text", sensitive: true },
-      api_hash: { label: "API Hash", type: "text", sensitive: true },
-      reconnect: {
-        label: "Переподключение",
-        description: "Автоматически переподключаться при обрыве соединения",
-        type: "bool",
+    monitoring: {
+      title: t("settings.sections.monitoring.title"),
+      description: t("settings.sections.monitoring.description"),
+      icon: "📡",
+      fields: {
+        check_interval: { label: t("settings.sections.monitoring.fields.checkInterval.label"), type: "number", unit: t("settings.sections.monitoring.fields.checkInterval.unit") },
+        realtime: {
+          label: t("settings.sections.monitoring.fields.realtime.label"),
+          description: t("settings.sections.monitoring.fields.realtime.description"),
+          type: "bool",
+        },
+        resync: {
+          label: t("settings.sections.monitoring.fields.resync.label"),
+          description: t("settings.sections.monitoring.fields.resync.description"),
+          type: "bool",
+        },
       },
     },
-  },
-  monitoring: {
-    title: "Мониторинг",
-    description: "Как часто опрашивается Telegram и синхронизируются истории",
-    icon: "📡",
-    fields: {
-      check_interval: { label: "Интервал проверки", type: "number", unit: "сек" },
-      realtime: {
-        label: "Обновления в реальном времени",
-        description: "Обрабатывать обновления по мере поступления",
-        type: "bool",
-      },
-      resync: {
-        label: "Резервная синхронизация",
-        description: "Восстанавливать пропущенные истории после перезапуска",
-        type: "bool",
-      },
-    },
-  },
-  queue: {
-    title: "Очередь",
-    description: "Обработка очереди просмотра",
-    icon: "🗂",
-    fields: {
-      max_tasks: { label: "Максимум задач за цикл", type: "number", min: 1 },
-      parallel: { label: "Параллельная обработка", type: "number", min: 1, unit: "задач" },
-      backoff_factor: {
-        label: "Множитель повтора",
-        description: "Экспоненциальная задержка между повторами ошибок",
-        type: "number",
-        step: 0.5,
-      },
-      processing_timeout: {
-        label: "Таймаут обработки",
-        description: "Задача в PROCESSING дольше этого времени считается зависшей (после падения воркера) и ставится обратно в очередь",
-        type: "number",
-        min: 30,
-        unit: "сек",
-      },
-      max_auto_retries: {
-        label: "Авто-повторы",
-        description: "Сколько раз автоматически возвращать зависшую задачу; дальше — только вручную",
-        type: "number",
-        min: 1,
+    queue: {
+      title: t("settings.sections.queue.title"),
+      description: t("settings.sections.queue.description"),
+      icon: "🗂",
+      fields: {
+        max_tasks: { label: t("settings.sections.queue.fields.maxTasks.label"), type: "number", min: 1 },
+        parallel: { label: t("settings.sections.queue.fields.parallel.label"), type: "number", min: 1, unit: t("settings.sections.queue.fields.parallel.unit") },
+        backoff_factor: {
+          label: t("settings.sections.queue.fields.backoffFactor.label"),
+          description: t("settings.sections.queue.fields.backoffFactor.description"),
+          type: "number",
+          step: 0.5,
+        },
+        processing_timeout: {
+          label: t("settings.sections.queue.fields.processingTimeout.label"),
+          description: t("settings.sections.queue.fields.processingTimeout.description"),
+          type: "number",
+          min: 30,
+          unit: t("settings.sections.queue.fields.processingTimeout.unit"),
+        },
+        max_auto_retries: {
+          label: t("settings.sections.queue.fields.maxAutoRetries.label"),
+          description: t("settings.sections.queue.fields.maxAutoRetries.description"),
+          type: "number",
+          min: 1,
+        },
       },
     },
-  },
-  limits: {
-    title: "Лимиты",
-    description: "Ограничения на просмотры и поиск — защита от блокировки",
-    icon: "🛡",
-    fields: {
-      views_per_minute: { label: "Просмотров в минуту", type: "number", min: 0 },
-      views_per_hour: { label: "Просмотров в час", type: "number", min: 0 },
-      views_per_day: { label: "Просмотров в сутки", type: "number", min: 0 },
-      searches_per_hour: { label: "Поисков в час", type: "number", min: 0 },
-      search_results_max: { label: "Макс. результатов поиска", type: "number", min: 1 },
-      search_delay: { label: "Задержка между поисками", type: "number", min: 1, unit: "сек" },
-    },
-  },
-  view: {
-    title: "Просмотр и реакции",
-    description: "Задержки перед просмотром и автолайк",
-    icon: "❤️",
-    fields: {
-      min_delay: { label: "Минимальная задержка", type: "number", min: 0, unit: "сек" },
-      max_delay: { label: "Максимальная задержка", type: "number", min: 0, unit: "сек" },
-      auto_like: {
-        label: "Автолайк",
-        description: "Ставить реакцию на каждую просмотренную историю",
-        type: "bool",
-      },
-      like_emoji: {
-        label: "Эмодзи лайка",
-        description: "Например: 👍 ❤️ 🔥",
-        type: "text",
+    limits: {
+      title: t("settings.sections.limits.title"),
+      description: t("settings.sections.limits.description"),
+      icon: "🛡",
+      fields: {
+        views_per_minute: { label: t("settings.sections.limits.fields.viewsPerMinute.label"), type: "number", min: 0 },
+        views_per_hour: { label: t("settings.sections.limits.fields.viewsPerHour.label"), type: "number", min: 0 },
+        views_per_day: { label: t("settings.sections.limits.fields.viewsPerDay.label"), type: "number", min: 0 },
+        searches_per_hour: { label: t("settings.sections.limits.fields.searchesPerHour.label"), type: "number", min: 0 },
+        search_results_max: { label: t("settings.sections.limits.fields.searchResultsMax.label"), type: "number", min: 1 },
+        search_delay: { label: t("settings.sections.limits.fields.searchDelay.label"), type: "number", min: 1, unit: t("settings.sections.limits.fields.searchDelay.unit") },
       },
     },
-  },
-  filters: {
-    title: "Фильтры",
-    description: "Каких авторов обрабатывать автоматически",
-    icon: "🎯",
-    fields: {
-      include_contacts: { label: "Контакты", type: "bool" },
-      include_unknown: { label: "Незнакомые пользователи", type: "bool" },
-      include_mutual_contacts: { label: "Взаимные контакты", type: "bool" },
-      include_non_mutual: { label: "Невзаимные контакты", type: "bool" },
-      include_channels: { label: "Каналы", type: "bool" },
-      include_groups: { label: "Группы", type: "bool" },
-      include_bots: { label: "Боты", type: "bool" },
-      include_deleted: { label: "Удалённые аккаунты", type: "bool" },
-      include_blocked: { label: "Заблокированные", type: "bool" },
+    view: {
+      title: t("settings.sections.view.title"),
+      description: t("settings.sections.view.description"),
+      icon: "❤️",
+      fields: {
+        min_delay: { label: t("settings.sections.view.fields.minDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.minDelay.unit") },
+        max_delay: { label: t("settings.sections.view.fields.maxDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.maxDelay.unit") },
+        auto_like: {
+          label: t("settings.sections.view.fields.autoLike.label"),
+          description: t("settings.sections.view.fields.autoLike.description"),
+          type: "bool",
+        },
+        like_emoji: {
+          label: t("settings.sections.view.fields.likeEmoji.label"),
+          description: t("settings.sections.view.fields.likeEmoji.description"),
+          type: "text",
+        },
+      },
     },
-  },
-};
-
-// The discovery section is managed on its own page (Поиск историй).
-const HIDDEN_SECTIONS = new Set(["discovery"]);
+    filters: {
+      title: t("settings.sections.filters.title"),
+      description: t("settings.sections.filters.description"),
+      icon: "🎯",
+      fields: {
+        include_contacts: { label: t("settings.sections.filters.fields.includeContacts.label"), type: "bool" },
+        include_unknown: { label: t("settings.sections.filters.fields.includeUnknown.label"), type: "bool" },
+        include_mutual_contacts: { label: t("settings.sections.filters.fields.includeMutualContacts.label"), type: "bool" },
+        include_non_mutual: { label: t("settings.sections.filters.fields.includeNonMutual.label"), type: "bool" },
+        include_channels: { label: t("settings.sections.filters.fields.includeChannels.label"), type: "bool" },
+        include_groups: { label: t("settings.sections.filters.fields.includeGroups.label"), type: "bool" },
+        include_bots: { label: t("settings.sections.filters.fields.includeBots.label"), type: "bool" },
+        include_deleted: { label: t("settings.sections.filters.fields.includeDeleted.label"), type: "bool" },
+        include_blocked: { label: t("settings.sections.filters.fields.includeBlocked.label"), type: "bool" },
+      },
+    },
+  };
+}
 
 const inputCls =
   "mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 transition-colors focus:border-emerald-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
 
 export default function SettingsPage() {
+  const { t } = useTranslation();
+  const SECTIONS = useSections();
   const [all, setAll] = useState<SettingsMap | null>(null);
   const [error, setError] = useState("");
   const [saveState, setSaveState] = useState<"saved" | "saving" | "dirty">(
@@ -207,13 +213,17 @@ export default function SettingsPage() {
   if (error && !all) return <ErrorBanner message={error} />;
   if (!all) return <Spinner />;
 
-  // Auto-save every change with a short debounce — no "Save all" button.
   const setField = (section: string, key: string, value: unknown) => {
     const next = {
       ...all,
       [section]: { ...all[section], [key]: value },
     };
     setAll(next);
+    // If language changed, update localStorage and notify I18nProvider
+    if (section === "general" && key === "language" && (value === "ru" || value === "en")) {
+      localStorage.setItem("storywatcher_lang", value);
+      window.dispatchEvent(new Event("storywatcher:lang-changed"));
+    }
     setSaveState("dirty");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
@@ -233,9 +243,9 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Настройки</h1>
+          <h1 className="text-xl font-semibold">{t("settings.title")}</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Настройки приложения и автоматизации
+            {t("settings.subtitle")}
           </p>
         </div>
       </div>
@@ -243,7 +253,7 @@ export default function SettingsPage() {
       {error && <ErrorBanner message={error} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {Object.entries(SECTIONS).map(([sectionKey, section]) => (
+        {Object.entries(SECTIONS).filter(([k]) => !HIDDEN_SECTIONS.has(k)).map(([sectionKey, section]) => (
           <Card key={sectionKey}>
             <CardHeader
               title={
@@ -272,8 +282,8 @@ export default function SettingsPage() {
       </div>
 
       <p className="text-xs text-slate-400 dark:text-slate-500">
-        Настройки поиска историй (хештеги, геолокации, интервал) — на странице{" "}
-        <span className="font-medium">Поиск историй</span>.
+        {t("settings.searchHint")}{" "}
+        <span className="font-medium">{t("settings.searchHintBold")}</span>.
       </p>
 
       {/* Auto-save status bar */}
@@ -281,19 +291,19 @@ export default function SettingsPage() {
         {saveState === "saving" ? (
           <span className="flex items-center gap-2 text-sm text-slate-400">
             <Spinner />
-            Сохранение…
+            {t("common.saving")}
           </span>
         ) : saveState === "dirty" ? (
           <span className="flex items-center gap-1.5 text-sm text-amber-500">
             <span className="h-2 w-2 rounded-full bg-amber-500" />
-            Сохраняем…
+            {t("common.saving")}
           </span>
         ) : (
           <span className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
               <path d="m4 12 5 5L20 7" />
             </svg>
-            Изменения сохраняются автоматически
+            {t("common.autoSaving")}
           </span>
         )}
       </div>

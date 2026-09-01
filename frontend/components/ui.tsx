@@ -147,10 +147,7 @@ export function Empty({ label }: { label: string }) {
   );
 }
 
-export const EMPTY = {
-  noData: "Нет данных",
-  noActivity: "Активности пока нет",
-};
+
 
 export function ErrorBanner({ message }: { message: string }) {
   return (

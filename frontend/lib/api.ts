@@ -50,7 +50,7 @@ async function request<T>(
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event("storywatcher:unauthorized"));
     }
-    throw new ApiError(401, "Неверный или отсутствующий API-токен");
+    throw new ApiError(401, "Invalid or missing API token");
   }
 
   let data: unknown = null;

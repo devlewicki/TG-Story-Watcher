@@ -3,12 +3,14 @@
 import { useState } from "react";
 import { api, type Account, clearToken } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
+import { useTranslation } from "@/lib/i18n";
 import { Badge, Button, Card, CardHeader, Empty, ErrorBanner, Spinner } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
 
 type FlowStep = "phone" | "code" | "password";
 
 export default function AccountsPage() {
+  const { t } = useTranslation();
   const { data, loading, error, refresh } = useFetch<Account[]>((s) =>
     api.get<Account[]>("/accounts", s)
   );
@@ -23,18 +25,18 @@ export default function AccountsPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Аккаунты</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">Подключённые Telegram-аккаунты</p>
+          <h1 className="text-xl font-semibold">{t("accounts.title")}</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400">{t("accounts.subtitle")}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={refresh}>↻ Обновить</Button>
-          <Button onClick={() => setShowModal(true)}>＋ Добавить</Button>
-          <Button variant="danger" onClick={() => { clearToken(); window.dispatchEvent(new Event("storywatcher:unauthorized")); }}>Выйти</Button>
+          <Button variant="secondary" onClick={refresh}>{t("common.refresh")}</Button>
+          <Button onClick={() => setShowModal(true)}>{t("common.add")}</Button>
+          <Button variant="danger" onClick={() => { clearToken(); window.dispatchEvent(new Event("storywatcher:unauthorized")); }}>{t("common.logout")}</Button>
         </div>
       </div>
 
       {accounts.length === 0 ? (
-        <Card><Empty label="Аккаунтов пока нет. Добавьте аккаунт, чтобы подключить Telegram." /></Card>
+        <Card><Empty label={t("accounts.noAccounts")} /></Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {accounts.map((a) => (
@@ -49,6 +51,7 @@ export default function AccountsPage() {
 }
 
 function AccountCard({ account, onChanged }: { account: Account; onChanged: () => void }) {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const fullName = [account.first_name, account.last_name].filter(Boolean).join(" ");
   const name = fullName || account.username || account.phone;
@@ -76,7 +79,7 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
   };
 
   const remove = async () => {
-    if (!confirm(`Удалить аккаунт ${name}? Telegram-сессия будет удалена.`)) return;
+    if (!confirm(t("accounts.deleteConfirm", { name }))) return;
     setBusy("delete");
     try {
       await api.delete(`/accounts/${account.id}`);
@@ -103,18 +106,18 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
       </div>
 
       <div className="mt-3 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-        <span>Мониторинг: <b>{account.monitoring ? "ВКЛ" : "ВЫКЛ"}</b></span>
-        <span>Был в сети {timeAgo(account.last_seen_at)}</span>
+        <span>{t("accounts.monitoringLabel")}: <b>{account.monitoring ? t("dashboard.on") : t("dashboard.off")}</b></span>
+        <span>{t("accounts.lastSeen")} {timeAgo(account.last_seen_at)}</span>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
         {account.status !== "ACTIVE" ? (
           <Button variant="secondary" disabled={busy !== null} onClick={() => act("start")}>
-            {busy === "start" ? "…" : "▶ Запустить"}
+            {busy === "start" ? "…" : t("accounts.start")}
           </Button>
         ) : (
           <Button variant="secondary" disabled={busy !== null} onClick={() => act("pause")}>
-            {busy === "pause" ? "…" : "⏸ Пауза"}
+            {busy === "pause" ? "…" : t("accounts.pause")}
           </Button>
         )}
         <Button
@@ -122,10 +125,10 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
           disabled={busy !== null}
           onClick={toggleMonitoring}
         >
-          Мониторинг {account.monitoring ? "ВЫКЛ" : "ВКЛ"}
+          {t("accounts.monitoringToggle")} {account.monitoring ? t("dashboard.off") : t("dashboard.on")}
         </Button>
         <Button variant="danger" disabled={busy !== null} onClick={remove} className="col-span-2 sm:col-span-1 sm:ml-auto">
-          {busy === "delete" ? "…" : "Удалить"}
+          {busy === "delete" ? "…" : t("common.delete")}
         </Button>
       </div>
     </Card>
@@ -133,6 +136,7 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
 }
 
 function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const { t } = useTranslation();
   const [step, setStep] = useState<FlowStep>("phone");
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
@@ -142,7 +146,7 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
 
   const sendCode = async () => {
     setError("");
-    if (phone.length < 5) return setError("Введите корректный номер телефона.");
+    if (phone.length < 5) return setError(t("accounts.phoneError"));
     setBusy(true);
     try {
       await api.post("/auth/send-code", { phone });
@@ -188,7 +192,7 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/50 p-4">
       <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Подключение Telegram</h2>
+          <h2 className="text-lg font-semibold">{t("accounts.connectTitle")}</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
         </div>
 
@@ -196,19 +200,19 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
           {(["phone", "code", "password"] as FlowStep[]).map((s, i) => (
             <span key={s} className="flex items-center gap-1">
               {i > 0 && <span>→</span>}
-              <span className={step === s ? "text-emerald-600" : ""}>{stepLabel(s)}</span>
+              <span className={step === s ? "text-emerald-600" : ""}>{stepLabel(s, t)}</span>
             </span>
           ))}
         </div>
 
         {step === "phone" && (
           <div className="mt-4">
-            <label className="text-sm text-slate-600 dark:text-slate-300">Номер телефона</label>
+            <label className="text-sm text-slate-600 dark:text-slate-300">{t("accounts.phoneLabel")}</label>
             <input
               type="text"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              placeholder="+15551234567"
+              placeholder={t("accounts.phonePlaceholder")}
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               autoFocus
             />
@@ -218,13 +222,13 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
         {step === "code" && (
           <div className="mt-4">
             <label className="text-sm text-slate-600 dark:text-slate-300">
-              Код подтверждения (отправлен в Telegram)
+              {t("accounts.codeLabel")}
             </label>
             <input
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder="12345"
+              placeholder={t("accounts.codePlaceholder")}
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               autoFocus
             />
@@ -234,13 +238,13 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
         {step === "password" && (
           <div className="mt-4">
             <label className="text-sm text-slate-600 dark:text-slate-300">
-              Пароль двухфакторной аутентификации
+              {t("accounts.passwordLabel")}
             </label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Пароль 2FA"
+              placeholder={t("accounts.passwordPlaceholder")}
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               autoFocus
             />
@@ -250,15 +254,15 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
         {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
 
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>Отмена</Button>
+          <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
           {step === "phone" && (
-            <Button onClick={sendCode} disabled={busy}>{busy ? "…" : "Отправить код"}</Button>
+            <Button onClick={sendCode} disabled={busy}>{busy ? "…" : t("common.sendCode")}</Button>
           )}
           {step === "code" && (
-            <Button onClick={confirmCode} disabled={busy}>{busy ? "…" : "Подтвердить"}</Button>
+            <Button onClick={confirmCode} disabled={busy}>{busy ? "…" : t("common.confirm")}</Button>
           )}
           {step === "password" && (
-            <Button onClick={confirmPassword} disabled={busy}>{busy ? "…" : "Войти"}</Button>
+            <Button onClick={confirmPassword} disabled={busy}>{busy ? "…" : t("common.login")}</Button>
           )}
         </div>
       </div>
@@ -266,6 +270,6 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
   );
 }
 
-function stepLabel(s: FlowStep): string {
-  return s === "phone" ? "Телефон" : s === "code" ? "Код" : "2FA";
+function stepLabel(s: FlowStep, t: (key: string) => string): string {
+  return s === "phone" ? t("common.phone") : s === "code" ? t("common.code") : t("common.twofa");
 }

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { api, type ActivityEvent } from "@/lib/api";
+import { useTranslation } from "@/lib/i18n";
 import { Button, Card, CardHeader, ErrorBanner, Spinner, Switch } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
 
@@ -10,7 +11,7 @@ const PlacesMap = dynamic(() => import("@/components/PlacesMap"), {
   ssr: false,
   loading: () => (
     <div className="flex h-[420px] items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400 dark:border-slate-800 dark:bg-slate-900">
-      Загружаем карту…
+      Loading map…
     </div>
   ),
 });
@@ -56,6 +57,7 @@ const venueIdOf = (line: string) =>
   line.startsWith("venue:") ? line.slice("venue:".length).trim() : null;
 
 export default function DiscoveryPage() {
+  const { t } = useTranslation();
   const [cfg, setCfg] = useState<DiscoveryConfig | null>(null);
   const [places, setPlaces] = useState<Place[]>([]);
   const [error, setError] = useState("");
@@ -129,7 +131,7 @@ export default function DiscoveryPage() {
     setNote("");
     try {
       const res = await api.post<{ note: string }>("/discovery/search");
-      setNote(res.note || "Поиск запущен.");
+      setNote(res.note || t("discovery.searchStarted"));
       setTimeout(loadLastRun, 8000);
     } catch (e) {
       setError((e as Error).message);
@@ -141,15 +143,15 @@ export default function DiscoveryPage() {
     const parts = tagInput.split(/[\s,;]+/).map(s => s.trim().replace(/^#/, "").toLowerCase()).filter(Boolean);
     if (parts.length === 0) { setTagInput(""); return; }
     const existing = new Set(cfg.hashtags);
-    const newTags = parts.filter(t => !existing.has(t));
+    const newTags = parts.filter(tg => !existing.has(tg));
     if (newTags.length > 0) {
       update({ hashtags: [...cfg.hashtags, ...newTags] });
     }
     setTagInput("");
   };
 
-  const removeTag = (t: string) =>
-    update({ hashtags: cfg.hashtags.filter((x) => x !== t) });
+  const removeTag = (tg: string) =>
+    update({ hashtags: cfg.hashtags.filter((x) => x !== tg) });
 
   const togglePlace = (p: Place) => {
     const line = `venue:${p.venue_id}`;
@@ -180,7 +182,7 @@ export default function DiscoveryPage() {
           ...placesRes.slice(0, 5).map((p) => ({
             kind: "place" as const,
             title: p.title,
-            subtitle: p.address || "место из собранных",
+            subtitle: p.address || t("discovery.placeFromCollection"),
             venueId: p.venue_id,
           })),
           ...geocodeRes.slice(0, 5).map((g) => ({
@@ -229,7 +231,7 @@ export default function DiscoveryPage() {
       const p = places.find((x) => x.venue_id === vid);
       return p
         ? { label: p.title, icon: "📍" }
-        : { label: `место (${vid.slice(0, 8)}…)`, icon: "📍" };
+        : { label: `place (${vid.slice(0, 8)}…)`, icon: "📍" };
     }
     if (line.startsWith("city:")) return { label: line.slice(5), icon: "🏙" };
     return { label: line, icon: "📍" };
@@ -269,22 +271,22 @@ export default function DiscoveryPage() {
   const intervalMin = Math.max(1, Math.round((cfg.search_interval || 60) / 60));
   const saveLabel =
     saveState === "saving"
-      ? "Сохранение…"
+      ? t("common.saving")
       : saveState === "dirty"
-      ? "Не сохранено"
-      : "Сохранено";
+      ? t("common.unsaved")
+      : t("common.saved");
 
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Поиск историй</h1>
+          <h1 className="text-xl font-semibold">{t("discovery.title")}</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Находим новые истории по хештегам и местам, собираем гео-метки
+            {t("discovery.subtitle")}
           </p>
           {lastRun && (
             <p className="mt-1 text-xs text-slate-400">
-              Последний поиск: {timeAgo(lastRun.created_at)} · {lastRun.message}
+              {t("discovery.lastSearch")}: {timeAgo(lastRun.created_at)} · {lastRun.message}
             </p>
           )}
         </div>
@@ -302,7 +304,7 @@ export default function DiscoveryPage() {
             {saveLabel}
           </span>
           <Button onClick={search} disabled={busy}>
-            {busy ? "Запускаем…" : "Поиск"}
+            {busy ? t("discovery.searching") : t("discovery.search")}
           </Button>
         </div>
       </div>
@@ -311,15 +313,15 @@ export default function DiscoveryPage() {
       {note && <p className="text-sm text-emerald-600 dark:text-emerald-400">{note}</p>}
 
       <Card>
-        <CardHeader title="Автопоиск" subtitle="Как часто искать новые истории" />
+        <CardHeader title={t("discovery.autoSearch")} subtitle={t("discovery.autoSearchDesc")} />
         <div className="space-y-4 p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
               <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                Искать истории автоматически
+                {t("discovery.autoSearchToggle")}
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                Поиск будет повторяться сам по расписанию
+                {t("discovery.autoSearchToggleDesc")}
               </div>
             </div>
             <Switch checked={cfg.enabled} onChange={(v) => update({ enabled: v })} />
@@ -327,39 +329,46 @@ export default function DiscoveryPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                Проверять каждые
+                {t("discovery.checkEvery")}
               </label>
-              <div className="mt-1.5 flex items-center gap-2">
+              <div className="mt-2 flex items-center gap-3">
                 <input
-                  type="number"
+                  type="range"
                   min={1}
+                  max={60}
                   value={intervalMin}
                   onChange={(e) =>
                     update({ search_interval: Math.max(1, Number(e.target.value)) * 60 })
                   }
-                  className="w-24 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+                  className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
                 />
-                <span className="text-sm text-slate-500">минут</span>
+                <span className="w-14 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                  {intervalMin} {t("discovery.minutes")}
+                </span>
               </div>
               <p className="mt-1 text-xs text-slate-400">
-                Не чаще 1 раза в минуту — Telegram ограничивает частоту поиска
+                {t("discovery.minIntervalNote")}
               </p>
             </div>
             <div>
               <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                Обрабатывать за один поиск
+                {t("discovery.processPerSearch")}
               </label>
-              <div className="mt-1.5 flex items-center gap-2">
+              <div className="mt-2 flex items-center gap-3">
                 <input
-                  type="number"
-                  min={1}
+                  type="range"
+                  min={50}
+                  max={200}
+                  step={10}
                   value={cfg.search_results_max}
                   onChange={(e) =>
-                    update({ search_results_max: Math.max(1, Number(e.target.value)) })
+                    update({ search_results_max: Math.max(50, Number(e.target.value)) })
                   }
-                  className="w-24 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+                  className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
                 />
-                <span className="text-sm text-slate-500">историй</span>
+                <span className="w-14 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                  {cfg.search_results_max}
+                </span>
               </div>
             </div>
           </div>
@@ -369,18 +378,18 @@ export default function DiscoveryPage() {
       <div className="grid gap-5 lg:grid-cols-2">
         <Card>
           <CardHeader
-            title="Хештеги"
-            subtitle="Истории, отмеченные этими тегами"
+            title={t("discovery.hashtags")}
+            subtitle={t("discovery.hashtagsDesc")}
           />
           <div className="space-y-3 p-5">
             {/* Toggle */}
             <div className="flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3.5 dark:border-emerald-500/20 dark:bg-emerald-500/5">
               <div>
                 <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                  Искать по хештегам
+                  {t("discovery.searchByHashtags")}
                 </div>
                 <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  Найдёт истории по заданным тегам и добавит в очередь
+                  {t("discovery.searchByHashtagsDesc")}
                 </div>
               </div>
               <Switch
@@ -403,16 +412,15 @@ export default function DiscoveryPage() {
                         className="flex flex-wrap gap-2 overflow-hidden transition-all duration-300"
                         style={{ maxHeight: overflows && !tagsExpanded ? collapsedMaxH : undefined }}
                       >
-                        {cfg.hashtags.map((t) => (
+                        {cfg.hashtags.map((tg) => (
                           <span
-                            key={t}
+                            key={tg}
                             className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-200"
                           >
-                            #{t}
+                            #{tg}
                             <button
-                              onClick={() => removeTag(t)}
+                              onClick={() => removeTag(tg)}
                               className="text-slate-400 transition-colors hover:text-red-500"
-                              title="Убрать"
                             >
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
                                 <path d="M6 6l12 12M18 6L6 18" />
@@ -427,14 +435,14 @@ export default function DiscoveryPage() {
                     </div>
                   )}
                   {cfg.hashtags.length === 0 && (
-                    <p className="text-sm text-slate-400">Хештеги пока не добавлены</p>
+                    <p className="text-sm text-slate-400">{t("discovery.noHashtags")}</p>
                   )}
                   {overflows && (
                     <button
                       onClick={() => setTagsExpanded(!tagsExpanded)}
                       className="text-xs font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
                     >
-                      {tagsExpanded ? `Свернуть` : `Показать все (${cfg.hashtags.length})`}
+                      {tagsExpanded ? t("discovery.collapse") : `Show all (${cfg.hashtags.length})`}
                     </button>
                   )}
                 </>
@@ -445,32 +453,31 @@ export default function DiscoveryPage() {
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addTag()}
-                placeholder="Волхов спб python docker (через пробел или запятую)"
+                placeholder={t("discovery.tagPlaceholder")}
                 className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               />
-              <Button variant="secondary" onClick={addTag}>Добавить</Button>
+              <Button variant="secondary" onClick={addTag}>{t("discovery.addTag")}</Button>
             </div>
             <p className="text-xs text-slate-400">
-              Подойдут названия городов, районов, увлечений: волхов, спб, путешествия
+              {t("discovery.tagHint")}
             </p>
           </div>
         </Card>
 
         <Card>
           <CardHeader
-            title="Места и города"
-            subtitle="Где искать истории по геолокации"
+            title={t("discovery.placesAndCities")}
+            subtitle={t("discovery.placesAndCitiesDesc")}
           />
           <div className="space-y-4 p-5">
             {/* Auto-add toggle */}
             <div className="flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3.5 dark:border-emerald-500/20 dark:bg-emerald-500/5">
               <div>
                 <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                  Автоматически добавлять собранные места в поиск
+                  {t("discovery.autoAddPlaces")}
                 </div>
                 <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  Каждое найденное место само попадает в «Ищем сейчас» на
-                  следующем цикле поиска — ничего не надо отмечать вручную
+                  {t("discovery.autoAddPlacesDesc")}
                 </div>
               </div>
               <Switch
@@ -487,13 +494,13 @@ export default function DiscoveryPage() {
               >
                 <span className="flex items-center gap-2">
                   🗺
-                  Собранные места на карте{" "}
+                  {t("discovery.mapTitle")}{" "}
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                     {places.length}
                   </span>
                 </span>
                 <span className="flex items-center gap-1 text-xs font-normal text-slate-400">
-                  {mapOpen ? "Свернуть" : "Открыть"}
+                  {mapOpen ? t("discovery.collapse") : t("discovery.expand")}
                   <svg
                     viewBox="0 0 24 24"
                     fill="none"
@@ -532,24 +539,24 @@ export default function DiscoveryPage() {
             <div>
               <div className="mb-2 flex items-center justify-between">
                 <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                  Ищем сейчас
+                  {t("discovery.searchingNow")}
                 </div>
                 {cfg.locations.length > 0 && (
                   <button
                     onClick={() => update({ locations: [] })}
                     className="text-xs font-medium text-slate-400 transition-colors hover:text-red-500"
                   >
-                    Очистить все
+                    {t("discovery.clearAll")}
                   </button>
                 )}
               </div>
               {cfg.locations.length === 0 && !cfg.auto_add_places ? (
                 <p className="text-sm text-slate-400">
-                  Пока ничего не выбрано — добавьте место или город ниже
+                  {t("discovery.nothingSelected")}
                 </p>
               ) : cfg.auto_add_places && cfg.locations.length === 0 ? (
                 <p className="text-sm text-emerald-600 dark:text-emerald-400">
-                  Ищутся все собранные места ({places.length}) автоматически
+                  {t("discovery.autoSearchingAll", { count: places.length })}
                 </p>
               ) : (
                 <div className="rounded-xl border border-slate-200 dark:border-slate-800">
@@ -562,9 +569,7 @@ export default function DiscoveryPage() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-slate-700 dark:text-slate-200">
-                        {cfg.locations.length}{" "}
-                        {cfg.locations.length === 1 ? "место" : cfg.locations.length < 5 ? "места" : "мест"}{" "}
-                        в поиске
+                        {t("discovery.placesCount", { count: cfg.locations.length, one: cfg.locations.length, few: cfg.locations.length, many: cfg.locations.length })}
                       </span>
                       <span className="block truncate text-xs text-slate-400">
                         {cfg.locations
@@ -600,7 +605,6 @@ export default function DiscoveryPage() {
                             <button
                               onClick={() => removeLocation(line)}
                               className="text-slate-300 transition-colors hover:text-red-500 dark:text-slate-600"
-                              title="Убрать"
                             >
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-4 w-4">
                                 <path d="M6 6l12 12M18 6L6 18" />
@@ -622,7 +626,7 @@ export default function DiscoveryPage() {
                 onChange={(e) => onGeoInput(e.target.value)}
                 onFocus={() => suggestions.length > 0 && setShowSugg(true)}
                 onBlur={() => setTimeout(() => setShowSugg(false), 150)}
-                placeholder="Добавить место или город…"
+                placeholder={t("discovery.addPlaceOrCity")}
                 className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
               />
               {showSugg && suggestions.length > 0 && (
@@ -641,7 +645,7 @@ export default function DiscoveryPage() {
                             : "bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400"
                         }`}
                       >
-                        {s.kind === "place" ? "место" : "город"}
+                        {s.kind === "place" ? t("discovery.place") : t("discovery.city")}
                       </span>
                       <div className="truncate text-xs text-slate-500 dark:text-slate-400">
                         {s.subtitle}
@@ -659,14 +663,14 @@ export default function DiscoveryPage() {
                 className="flex cursor-pointer w-full items-center justify-between px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/50"
               >
                 <span className="flex items-center gap-2">
-                  Собранные места{" "}
+                  {t("discovery.collectedPlaces")}{" "}
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                     {places.length}
                   </span>
                 </span>
                 <span className="flex items-center gap-2">
                   <span className="hidden text-xs font-normal text-slate-400 sm:inline">
-                    из историй автоматически
+                    {t("discovery.fromStories")}
                   </span>
                   <svg
                     viewBox="0 0 24 24"
@@ -686,23 +690,22 @@ export default function DiscoveryPage() {
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex gap-3 text-xs">
                       <button onClick={selectAll} className="font-medium text-emerald-600 hover:underline dark:text-emerald-400">
-                        Выделить все
+                        Select all
                       </button>
                       <button onClick={deselectAll} className="font-medium text-slate-500 hover:underline dark:text-slate-400">
-                        Снять все
+                        Deselect all
                       </button>
                     </div>
                     <input
                       value={placeFilter}
                       onChange={(e) => setPlaceFilter(e.target.value)}
-                      placeholder="Поиск места…"
+                      placeholder="Search place…"
                       className="w-40 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"
                     />
                   </div>
                   {places.length === 0 ? (
                     <p className="px-2 py-3 text-center text-xs text-slate-400">
-                      Места появятся автоматически, когда в найденных историях
-                      встретятся гео-метки
+                      Places will appear automatically when geo-tags are found in discovered stories
                     </p>
                   ) : (
                     <div className="max-h-56 space-y-0.5 overflow-auto">
@@ -733,7 +736,6 @@ export default function DiscoveryPage() {
                                 deletePlace(p);
                               }}
                               className="text-slate-300 transition-colors hover:text-red-500 dark:text-slate-600"
-                              title="Удалить место"
                             >
                               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
                                 <path d="M3 6h18M8 6V4h8v2m1 0-1 14H8L7 6" />
@@ -744,7 +746,7 @@ export default function DiscoveryPage() {
                       })}
                       {filteredPlaces.length === 0 && (
                         <p className="px-2 py-3 text-center text-xs text-slate-400">
-                          Ничего не найдено
+                          Nothing found
                         </p>
                       )}
                     </div>
@@ -755,8 +757,8 @@ export default function DiscoveryPage() {
 
             <p className="text-xs text-slate-400">
               {cfg.auto_add_places
-                ? "Места собираются из найденных историй и ищутся автоматически. "
-                : "Места собираются из найденных историй — отметьте чекбоксами нужные, и они добавятся в «Ищем сейчас»."}
+                ? "Places are collected from discovered stories and searched automatically. "
+                : "Places are collected from discovered stories — check the ones you want and they'll be added to \"Searching now\"."}
             </p>
           </div>
         </Card>

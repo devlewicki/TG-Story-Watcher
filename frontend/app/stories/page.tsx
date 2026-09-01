@@ -3,12 +3,15 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, type Story } from "@/lib/api";
+import { useFetch } from "@/lib/useFetch";
+import { useTranslation } from "@/lib/i18n";
 import { Avatar, Card, Empty, ErrorBanner, Spinner, Button } from "@/components/ui";
 import { formatTime } from "@/lib/format";
 
 const PAGE = 200;
 
 export default function StoriesPage() {
+  const { t } = useTranslation();
   const [items, setItems] = useState<Story[] | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -48,25 +51,25 @@ export default function StoriesPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Истории</h1>
+          <h1 className="text-xl font-semibold">{t("stories.title")}</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {shown < total
-              ? `Показано ${shown} из ${total} историй`
-              : `${total} ${total === 1 ? "история" : total < 5 ? "истории" : "историй"}`}
-            {" · "}
+              ? t("stories.shown", { shown, total })
+              : t("stories.count", { total, one: total, few: total, many: total })}
+            {". "}
             <Link href="/" className="text-emerald-600 hover:underline dark:text-emerald-400">
-              живая лента на дашборде
+              {t("stories.liveFeed")}
             </Link>
           </p>
         </div>
-        <Button variant="secondary" onClick={() => load(0, false)}>↻ Обновить</Button>
+        <Button variant="secondary" onClick={() => load(0, false)}>{t("common.refresh")}</Button>
       </div>
 
       {error && <ErrorBanner message={error} />}
 
       {list.length === 0 ? (
         <Card>
-          <Empty label="Историй пока нет" />
+          <Empty label={t("stories.noStories")} />
         </Card>
       ) : (
         <>
@@ -91,12 +94,12 @@ export default function StoriesPage() {
                       {s.last_viewed_at ? (
                         <>
                           <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400">
-                            Просмотрена {formatTime(s.last_viewed_at)}
+                            {t("stories.viewed")} {formatTime(s.last_viewed_at)}
                           </span>
                           <span>👁 {s.view_count}</span>
                         </>
                       ) : (
-                        <span>Не просмотрена</span>
+                        <span>{t("stories.notViewed")}</span>
                       )}
                       <span className="text-slate-300 dark:text-slate-600">·</span>
                       <span>{s.source}</span>
@@ -107,7 +110,7 @@ export default function StoriesPage() {
                   {s.liked ? (
                     <span
                       className="flex items-center gap-1 text-sm text-rose-500 dark:text-rose-400"
-                      title="Автолайк поставлен"
+                      title={t("stories.autoLike")}
                     >
                       {s.like_emoji || "❤️"}
                     </span>
@@ -125,7 +128,6 @@ export default function StoriesPage() {
                     </svg>
                   )}
                   <span className="w-24 shrink-0 text-right text-xs text-slate-400">
-                    {/* Просмотренным историям время уже показано слева — не дублируем */}
                     {s.last_viewed_at ? "" : formatTime(s.published_at)}
                   </span>
                 </li>
@@ -139,7 +141,7 @@ export default function StoriesPage() {
                 onClick={() => load(shown, true)}
                 disabled={loadingMore}
               >
-                {loadingMore ? "Загружаем…" : `Показать ещё (${Math.min(PAGE, total - shown)})`}
+                {loadingMore ? t("common.loading") : t("stories.showMore", { count: Math.min(PAGE, total - shown) })}
               </Button>
             </div>
           )}

@@ -3,10 +3,12 @@
 import { useState } from "react";
 import { api, type ListEntry } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
+import { useTranslation } from "@/lib/i18n";
 import { Button, Card, CardHeader, Empty, ErrorBanner, Spinner } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
 
 export function ListManager({ title, kind }: { title: string; kind: "whitelist" | "blacklist" }) {
+  const { t } = useTranslation();
   const { data, loading, error, refresh } = useFetch<ListEntry[]>((s) =>
     api.get<ListEntry[]>(`/${kind}`, s)
   );
@@ -50,44 +52,44 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
       <h1 className="text-xl font-semibold">{title}</h1>
 
       <Card className="p-4">
-        <CardHeader title="Добавить запись" />
+        <CardHeader title={t("listManager.addRecord")} />
         <div className="mt-3 grid gap-3 md:grid-cols-5">
           <div>
-            <label className="text-xs text-slate-500">ID аккаунта</label>
+            <label className="text-xs text-slate-500">{t("listManager.accountId")}</label>
             <input value={accountId} onChange={(e) => setAccountId(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
           </div>
           <div>
-            <label className="text-xs text-slate-500">Username</label>
+            <label className="text-xs text-slate-500">{t("listManager.username")}</label>
             <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="@user" className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
           </div>
           <div>
-            <label className="text-xs text-slate-500">Telegram ID</label>
-            <input value={peerId} onChange={(e) => setPeerId(e.target.value)} placeholder="необязательно" className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
+            <label className="text-xs text-slate-500">{t("listManager.telegramId")}</label>
+            <input value={peerId} onChange={(e) => setPeerId(e.target.value)} placeholder={t("listManager.telegramIdOptional")} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
           </div>
           <div>
-            <label className="text-xs text-slate-500">Комментарий</label>
+            <label className="text-xs text-slate-500">{t("listManager.comment")}</label>
             <input value={comment} onChange={(e) => setComment(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
           </div>
           <div className="flex items-end">
-            <Button className="w-full" onClick={add}>Добавить</Button>
+            <Button className="w-full" onClick={add}>{t("listManager.add")}</Button>
           </div>
         </div>
       </Card>
 
       <Card>
-        <CardHeader title={`${items.length} записей`} right={<Button variant="secondary" onClick={refresh}>↻</Button>} />
+        <CardHeader title={`${items.length} ${t("listManager.records")}`} right={<Button variant="secondary" onClick={refresh}>↻</Button>} />
         {items.length === 0 ? (
-          <Empty label={`${title} пуст`} />
+          <Empty label={t("listManager.empty", { title })} />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                  <th className="px-4 py-2">Username</th>
-                  <th className="px-4 py-2">Peer ID</th>
-                  <th className="px-4 py-2">Комментарий</th>
-                  <th className="px-4 py-2">Добавлен</th>
-                  <th className="px-4 py-2 text-right">Действия</th>
+                  <th className="px-4 py-2">{t("listManager.colUsername")}</th>
+                  <th className="px-4 py-2">{t("listManager.colPeerId")}</th>
+                  <th className="px-4 py-2">{t("listManager.colComment")}</th>
+                  <th className="px-4 py-2">{t("listManager.colAdded")}</th>
+                  <th className="px-4 py-2 text-right">{t("listManager.colActions")}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -98,7 +100,7 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
                     <td className="px-4 py-2 text-slate-500">{e.comment || "—"}</td>
                     <td className="px-4 py-2 text-slate-500">{timeAgo(e.created_at)}</td>
                     <td className="px-4 py-2 text-right">
-                      <Button variant="danger" onClick={() => remove(e.id)}>Удалить</Button>
+                      <Button variant="danger" onClick={() => remove(e.id)}>{t("common.delete")}</Button>
                     </td>
                   </tr>
                 ))}

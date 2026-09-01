@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { api, type DashboardData } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
+import { useTranslation, useLocale } from "@/lib/i18n";
 import { Badge, Card, CardHeader, Empty, ErrorBanner, Spinner, StatCard } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
 
@@ -29,13 +30,15 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 export default function DashboardPage() {
+  const { t } = useTranslation();
+  const locale = useLocale();
   const { data, loading, error, refresh } = useFetch<DashboardData>((s) =>
     api.get<DashboardData>("/dashboard", s)
   );
 
   if (loading) return <Spinner />;
   if (error) return <ErrorBanner message={error} />;
-  if (!data) return <Empty label="Нет данных" />;
+  if (!data) return <Empty label={t("dashboard.noData")} />;
 
   const cards = data.cards;
   const hourData = data.charts.views_by_hour.map((h) => ({
@@ -43,7 +46,7 @@ export default function DashboardPage() {
     count: h.count,
   }));
   const dayData = data.charts.views_by_day.map((d) => ({
-    label: new Date(d.day).toLocaleDateString("ru-RU", { day: "numeric", month: "short" }),
+    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short" }),
     count: d.count,
   }));
 
@@ -51,31 +54,31 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Дашборд</h1>
+          <h1 className="text-xl font-semibold">{t("dashboard.title")}</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Активных аккаунтов: {data.accounts.active} из {data.accounts.total}
+            {t("dashboard.activeAccounts")}: {data.accounts.active} {t("dashboard.of")} {data.accounts.total}
           </p>
         </div>
         <button
           onClick={refresh}
           className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
         >
-          ↻ Обновить
+          {t("common.refresh")}
         </button>
       </div>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-        <StatCard label="Аккаунты" value={cards.accounts} icon={<UserIcon />} accentKey="indigo" />
-        <StatCard label="Мониторинг" value={cards.monitoring > 0 ? "ВКЛ" : "ВЫКЛ"} accent={cards.monitoring > 0} icon={<PulseIcon />} />
-        <StatCard label="Просмотрено сегодня" value={cards.viewed_today} accent icon={<EyeIcon />} />
-        <StatCard label="В очереди" value={cards.in_queue} icon={<ListIcon />} accentKey="sky" />
-        <StatCard label="Пропущено (24ч)" value={cards.skipped} icon={<FilterIcon />} accentKey="amber" />
-        <StatCard label="Ошибки (24ч)" value={cards.errors} accent={cards.errors > 0} icon={<AlertIcon />} accentKey={cards.errors > 0 ? "red" : "default"} />
+        <StatCard label={t("dashboard.accounts")} value={cards.accounts} icon={<UserIcon />} accentKey="indigo" />
+        <StatCard label={t("dashboard.monitoring")} value={cards.monitoring > 0 ? t("dashboard.on") : t("dashboard.off")} accent={cards.monitoring > 0} icon={<PulseIcon />} />
+        <StatCard label={t("dashboard.viewedToday")} value={cards.viewed_today} accent icon={<EyeIcon />} />
+        <StatCard label={t("dashboard.inQueue")} value={cards.in_queue} icon={<ListIcon />} accentKey="sky" />
+        <StatCard label={t("dashboard.skipped24h")} value={cards.skipped} icon={<FilterIcon />} accentKey="amber" />
+        <StatCard label={t("dashboard.errors24h")} value={cards.errors} accent={cards.errors > 0} icon={<AlertIcon />} accentKey={cards.errors > 0 ? "red" : "default"} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
-          <CardHeader title="Просмотры по часам (сегодня)" />
+          <CardHeader title={t("dashboard.viewsByHour")} />
           <div className="p-4 pt-3">
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={hourData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
@@ -96,7 +99,7 @@ export default function DashboardPage() {
         </Card>
 
         <Card>
-          <CardHeader title="Просмотры по дням (14 дней)" />
+          <CardHeader title={t("dashboard.viewsByDay")} />
           <div className="p-4 pt-3">
             <ResponsiveContainer width="100%" height={220}>
               <AreaChart data={dayData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
@@ -125,10 +128,10 @@ export default function DashboardPage() {
       </div>
 
       <Card>
-        <CardHeader title="Последняя активность" />
+        <CardHeader title={t("dashboard.recentActivity")} />
         <ul className="divide-y divide-slate-100 dark:divide-slate-800">
           {data.recent.length === 0 ? (
-            <Empty label="Активности пока нет" />
+            <Empty label={t("dashboard.noActivity")} />
           ) : (
             data.recent.map((e) => (
               <li key={e.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
