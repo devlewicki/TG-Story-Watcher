@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type QueueItem } from "@/lib/api";
+import { useTranslation } from "@/lib/i18n";
 import { Avatar, Badge, Button, Card, Empty, ErrorBanner, Spinner } from "@/components/ui";
 import { formatTime } from "@/lib/format";
 
@@ -9,6 +10,7 @@ const ACTIVE = ["PENDING", "WAITING_DELAY", "PROCESSING"];
 const PAGE = 200;
 
 function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: number) => void; onRetry: (id: number) => void }) {
+  const { t } = useTranslation();
   const name = item.story?.author_name || "—";
   const username = item.story?.author_username;
   return (
@@ -27,7 +29,7 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
               ? `${item.story.peer_id}/${item.story.telegram_story_id}`
               : `story #${item.story_id}`}
           </span>
-          {item.attempts > 1 && <span>· попыток: {item.attempts}</span>}
+          {item.attempts > 1 && <span>· {t("queue.attempts")}: {item.attempts}</span>}
           {item.error && (
             <span className="truncate text-red-500 dark:text-red-400" title={item.error}>
               · {item.error}
@@ -45,7 +47,7 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
         {!["VIEWED", "CANCELLED"].includes(item.status) && (
           <button
             onClick={() => onCancel(item.id)}
-            title="Отменить"
+            title={t("queue.cancel")}
             className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="h-4 w-4">
@@ -56,7 +58,7 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
         {item.status === "FAILED" && (
           <button
             onClick={() => onRetry(item.id)}
-            title="Повторить"
+            title={t("queue.retry")}
             className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-200"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
@@ -71,6 +73,7 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
 }
 
 export default function QueuePage() {
+  const { t } = useTranslation();
   const [items, setItems] = useState<QueueItem[] | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -129,24 +132,24 @@ export default function QueuePage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Очередь</h1>
+          <h1 className="text-xl font-semibold">{t("queue.title")}</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {shown === 0
-              ? "Очередь пуста"
+              ? t("queue.empty")
               : shown < total
-              ? `${stats.active} в работе · ${stats.viewed} просмотрено · показано ${shown}/${total}`
-              : `${stats.active} в работе · ${stats.viewed} просмотрено из ${total}${stats.failed ? ` · ${stats.failed} ошибок` : ""}`}
+              ? `${stats.active} ${t("queue.active")} · ${stats.viewed} ${t("queue.viewed")} · ${t("queue.shown")} ${shown}/${total}`
+              : `${stats.active} ${t("queue.active")} · ${stats.viewed} ${t("queue.viewed")} ${t("dashboard.of")} ${total}${stats.failed ? ` · ${stats.failed} ${t("queue.errors")}` : ""}`}
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => load(0, false)}>↻ Обновить</Button>
+          <Button variant="secondary" onClick={() => load(0, false)}>{t("common.refresh")}</Button>
           <Button
             variant="danger"
             onClick={() => {
-              if (confirm("Очистить активную очередь?")) act("/queue/clear");
+              if (confirm(t("queue.clearConfirm"))) act("/queue/clear");
             }}
           >
-            Очистить
+            {t("queue.clear")}
           </Button>
         </div>
       </div>
@@ -155,7 +158,7 @@ export default function QueuePage() {
 
       {list.length === 0 ? (
         <Card>
-          <Empty label="Очередь пуста" />
+          <Empty label={t("queue.empty")} />
         </Card>
       ) : (
         <>
@@ -178,7 +181,7 @@ export default function QueuePage() {
                 onClick={() => load(shown, true)}
                 disabled={loadingMore}
               >
-                {loadingMore ? "Загружаем…" : `Показать ещё (${Math.min(PAGE, total - shown)})`}
+                {loadingMore ? t("common.loading") : t("queue.showMore", { count: Math.min(PAGE, total - shown) })}
               </Button>
             </div>
           )}

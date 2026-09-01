@@ -6,6 +6,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet.markercluster/dist/MarkerCluster.css";
 import "leaflet.markercluster/dist/MarkerCluster.Default.css";
+import { useTranslation } from "@/lib/i18n";
 
 export type MapPlace = {
   id: number;
@@ -30,8 +31,6 @@ function pinIcon(selected: boolean): L.DivIcon {
   });
 }
 
-/* Dark-mode aware tile toggle handled by re-render on theme via key. */
-
 export default function PlacesMap({
   places,
   selectedVids,
@@ -41,7 +40,7 @@ export default function PlacesMap({
   selectedVids: Set<string>;
   onToggle: (p: MapPlace) => void;
 }) {
-  // Default center: a place (or fallback) so the map opens somewhere useful.
+  const { t } = useTranslation();
   const first = places.find((p) => p.lat != null && p.long != null);
   const center: [number, number] =
     first && first.lat != null && first.long != null
@@ -88,7 +87,7 @@ export default function PlacesMap({
                         : "bg-emerald-600 text-white hover:bg-emerald-700"
                     }`}
                   >
-                    {selected ? "✓ В поиске — убрать" : "Искать здесь"}
+                    {selected ? t("discovery.venueSelected") : t("discovery.venueSearch")}
                   </button>
                 </div>
               </Popup>

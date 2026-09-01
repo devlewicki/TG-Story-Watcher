@@ -1,26 +1,42 @@
+import { type Lang } from "@/lib/i18n";
+
+// We can't use the hook here since this is a utility file, not a component.
+// We'll read from localStorage directly for the locale.
+function getLocale(): string {
+  if (typeof window === "undefined") return "ru-RU";
+  const lang = localStorage.getItem("storywatcher_lang");
+  return lang === "en" ? "en-US" : "ru-RU";
+}
+
+function getLang(): Lang {
+  if (typeof window === "undefined") return "ru";
+  return (localStorage.getItem("storywatcher_lang") as Lang) || "ru";
+}
+
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "—";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "—";
   const diff = Date.now() - then;
   const sec = Math.floor(diff / 1000);
-  if (sec < 5) return "только что";
-  if (sec < 60) return `${sec} сек назад`;
+  const lang = getLang();
+  if (sec < 5) return lang === "en" ? "just now" : "только что";
+  if (sec < 60) return lang === "en" ? `${sec} sec ago` : `${sec} сек назад`;
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} мин назад`;
+  if (min < 60) return lang === "en" ? `${min} min ago` : `${min} мин назад`;
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} ч назад`;
+  if (hr < 24) return lang === "en" ? `${hr} hr ago` : `${hr} ч назад`;
   const day = Math.floor(hr / 24);
-  if (day < 30) return `${day} дн назад`;
+  if (day < 30) return lang === "en" ? `${day} days ago` : `${day} дн назад`;
   const month = Math.floor(day / 30);
-  return `${month} мес назад`;
+  return lang === "en" ? `${month} months ago` : `${month} мес назад`;
 }
 
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("ru-RU", {
+  return d.toLocaleString(getLocale(), {
     day: "numeric",
     month: "short",
     hour: "2-digit",

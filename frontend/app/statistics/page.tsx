@@ -17,6 +17,7 @@ import {
 } from "recharts";
 import { api } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
+import { useTranslation, useLocale } from "@/lib/i18n";
 import { Card, CardHeader, Empty, ErrorBanner, Spinner, StatCard } from "@/components/ui";
 
 type Stats = {
@@ -47,23 +48,29 @@ const PIE_COLORS = [
   "#e11d48",
 ];
 
-const ACTIVITY_LABELS: Record<string, string> = {
-  story_viewed: "Просмотрено",
-  story_liked: "Лайков",
-  story_queued: "В очередь",
-  story_skipped: "Отфильтровано",
-  fetch_available: "Синхронизация",
-  discovery_hashtag: "Поиск #",
-  discovery_geo: "Поиск по местам",
-  discovery_error: "Ошибки поиска",
-  api_error: "Ошибки API",
-  worker_error: "Ошибки worker",
-};
+function useActivityLabels(): Record<string, string> {
+  const { t } = useTranslation();
+  return {
+    story_viewed: t("statistics.views"),
+    story_liked: t("statistics.likes"),
+    story_queued: t("nav.queue"),
+    story_skipped: t("statistics.filtered"),
+    fetch_available: t("analytics.syncing"),
+    discovery_hashtag: "#",
+    discovery_geo: t("discovery.place"),
+    discovery_error: t("statistics.errors"),
+    api_error: t("statistics.errors"),
+    worker_error: t("statistics.errors"),
+  };
+}
 
-const SOURCE_LABELS: Record<string, string> = {
-  monitor: "Лента аккаунта",
-  "discovery:geo": "По месту",
-};
+function useSourceLabels(): Record<string, string> {
+  const { t } = useTranslation();
+  return {
+    monitor: t("nav.stories"),
+    "discovery:geo": t("discovery.place"),
+  };
+}
 
 const QUEUE_STATUS_COLORS: Record<string, string> = {
   PENDING: "bg-sky-500",
@@ -101,6 +108,10 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 export default function StatisticsPage() {
+  const { t } = useTranslation();
+  const locale = useLocale();
+  const ACTIVITY_LABELS = useActivityLabels();
+  const SOURCE_LABELS = useSourceLabels();
   const [days, setDays] = useState(7);
   const { data, loading, error } = useFetch<Stats>(
     (s) => api.get<Stats>(`/stats?days=${days}`, s),
@@ -109,10 +120,10 @@ export default function StatisticsPage() {
 
   if (loading) return <Spinner />;
   if (error) return <ErrorBanner message={error} />;
-  if (!data) return <Empty label="Нет статистики" />;
+  if (!data) return <Empty label={t("statistics.noData")} />;
 
   const dayData = data.views_by_day.map((d) => ({
-    label: new Date(d.day).toLocaleDateString("ru-RU", { day: "numeric", month: "short" }),
+    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short" }),
     count: d.count,
   }));
   const hourData = data.views_by_hour.map((h) => ({
@@ -133,9 +144,9 @@ export default function StatisticsPage() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Статистика</h1>
+          <h1 className="text-xl font-semibold">{t("statistics.title")}</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Наши действия за последние {days} дн
+            {t("statistics.subtitle", { days })}
           </p>
         </div>
         <div className="flex rounded-xl border border-slate-300 p-0.5 dark:border-slate-700">
@@ -149,23 +160,23 @@ export default function StatisticsPage() {
                   : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
               }`}
             >
-              {d} дн
+              {d} {t("statistics.day")}
             </button>
           ))}
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard label="Просмотры" value={data.views_total} accent icon={<EyeIcon />} />
-        <StatCard label="Лайки" value={data.likes_total} icon={<HeartIcon />} accentKey="red" />
-        <StatCard label="Найдено историй" value={data.stories_found} icon={<SearchIcon />} accentKey="sky" />
-        <StatCard label="Отфильтровано" value={data.skipped_total} icon={<FilterIcon />} accentKey="amber" />
-        <StatCard label="Ошибки" value={data.errors_total} icon={<AlertIcon />} accentKey={data.errors_total > 0 ? "red" : "default"} />
+        <StatCard label={t("statistics.views")} value={data.views_total} accent icon={<EyeIcon />} />
+        <StatCard label={t("statistics.likes")} value={data.likes_total} icon={<HeartIcon />} accentKey="red" />
+        <StatCard label={t("statistics.foundStories")} value={data.stories_found} icon={<SearchIcon />} accentKey="sky" />
+        <StatCard label={t("statistics.filtered")} value={data.skipped_total} icon={<FilterIcon />} accentKey="amber" />
+        <StatCard label={t("statistics.errors")} value={data.errors_total} icon={<AlertIcon />} accentKey={data.errors_total > 0 ? "red" : "default"} />
       </div>
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Card>
-          <CardHeader title="Просмотры по дням" subtitle={`За последние ${days} дн`} />
+          <CardHeader title={t("statistics.viewsByDay")} subtitle={t("statistics.viewsByPeriod", { days })} />
           <div className="p-4 pt-3">
             <ResponsiveContainer width="100%" height={230}>
               <AreaChart data={dayData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
@@ -193,9 +204,9 @@ export default function StatisticsPage() {
         </Card>
 
         <Card>
-          <CardHeader title="Активность" subtitle="Что делали за период" />
+          <CardHeader title={t("statistics.activity")} subtitle={t("statistics.activityPeriod")} />
           {activityData.length === 0 ? (
-            <Empty label="Нет данных" />
+            <Empty label={t("statistics.noData")} />
           ) : (
             <div className="p-4 pt-3">
               <ResponsiveContainer width="100%" height={230}>
@@ -221,8 +232,8 @@ export default function StatisticsPage() {
                     {activityData.map((a, i) => (
                       <Cell
                         key={i}
-                        fill={a.name.toLowerCase().includes("ошибк") ? "#f43f5e" : "url(#gradAct)"}
-                        fillOpacity={a.name.toLowerCase().includes("ошибк") ? 1 : 0.9}
+                        fill={a.name.toLowerCase().includes("error") ? "#f43f5e" : "url(#gradAct)"}
+                        fillOpacity={a.name.toLowerCase().includes("error") ? 1 : 0.9}
                       />
                     ))}
                   </Bar>
@@ -235,7 +246,7 @@ export default function StatisticsPage() {
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Card>
-          <CardHeader title="Просмотры по часам" subtitle="Распределение за период (UTC)" />
+          <CardHeader title={t("statistics.viewsByHour")} subtitle={t("statistics.viewsByHourSubtitle")} />
           <div className="p-4 pt-3">
             <ResponsiveContainer width="100%" height={230}>
               <BarChart data={hourData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
@@ -258,9 +269,9 @@ export default function StatisticsPage() {
         </Card>
 
         <Card>
-          <CardHeader title="Источники просмотров" subtitle="Откуда взяты истории" />
+          <CardHeader title={t("statistics.viewSources")} subtitle={t("statistics.viewSourcesSubtitle")} />
           {sourceData.length === 0 ? (
-            <Empty label="Нет просмотров" />
+            <Empty label={t("statistics.noViews")} />
           ) : (
             <div className="flex flex-col items-center gap-4 p-5 sm:flex-row sm:justify-center">
               <div className="relative h-48 w-48 shrink-0">
@@ -286,7 +297,7 @@ export default function StatisticsPage() {
                   <span className="text-2xl font-bold text-slate-900 dark:text-slate-50">
                     {sourceTotal}
                   </span>
-                  <span className="text-xs text-slate-400">просмотров</span>
+                  <span className="text-xs text-slate-400">{t("statistics.viewsTotal")}</span>
                 </div>
               </div>
               <ul className="w-full space-y-1.5 sm:max-w-xs">
@@ -313,7 +324,7 @@ export default function StatisticsPage() {
 
       {Object.keys(data.queue_by_status).length > 0 && (
         <Card>
-          <CardHeader title="Очередь сейчас" subtitle="Текущее состояние задач" />
+          <CardHeader title={t("statistics.queueNow")} subtitle={t("statistics.queueSubtitle")} />
           <div className="flex flex-wrap gap-3 p-5">
             {Object.entries(data.queue_by_status).map(([status, count]) => (
               <span
