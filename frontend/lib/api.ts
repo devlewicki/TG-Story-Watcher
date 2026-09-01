@@ -89,6 +89,7 @@ export type Account = {
   status: string;
   monitoring: boolean;
   auto_view: boolean;
+  is_premium: boolean;
   last_seen_at: string | null;
 };
 

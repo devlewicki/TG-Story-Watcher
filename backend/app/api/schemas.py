@@ -26,6 +26,7 @@ class AccountOut(BaseModel):
     status: str
     monitoring: bool
     auto_view: bool
+    is_premium: bool = False
     last_seen_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -118,6 +119,7 @@ def account_out(a) -> AccountOut:
         status=a.status,
         monitoring=a.monitoring,
         auto_view=a.auto_view,
+        is_premium=getattr(a, "is_premium", False),
         last_seen_at=a.last_seen_at,
         created_at=a.created_at,
         updated_at=a.updated_at,

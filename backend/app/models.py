@@ -86,6 +86,7 @@ class TelegramAccount(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Story(Base):
