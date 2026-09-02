@@ -20,6 +20,8 @@ type FieldDef = {
   options?: { value: string; label: string }[];
   sensitive?: boolean;
   command?: { label: string; detect: () => string };
+  slider?: { min: number; max: number; step?: number };
+  emoji?: string[];
 };
 
 type SectionDef = {
@@ -92,7 +94,7 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.monitoring.description"),
       icon: "📡",
       fields: {
-        check_interval: { label: t("settings.sections.monitoring.fields.checkInterval.label"), type: "number", unit: t("settings.sections.monitoring.fields.checkInterval.unit") },
+        check_interval: { label: t("settings.sections.monitoring.fields.checkInterval.label"), type: "number", unit: t("settings.sections.monitoring.fields.checkInterval.unit"), slider: { min: 10, max: 120, step: 5 } },
         realtime: {
           label: t("settings.sections.monitoring.fields.realtime.label"),
           description: t("settings.sections.monitoring.fields.realtime.description"),
@@ -110,13 +112,14 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.queue.description"),
       icon: "🗂",
       fields: {
-        max_tasks: { label: t("settings.sections.queue.fields.maxTasks.label"), type: "number", min: 1 },
-        parallel: { label: t("settings.sections.queue.fields.parallel.label"), type: "number", min: 1, unit: t("settings.sections.queue.fields.parallel.unit") },
+        max_tasks: { label: t("settings.sections.queue.fields.maxTasks.label"), type: "number", min: 1, slider: { min: 50, max: 2000, step: 50 } },
+        parallel: { label: t("settings.sections.queue.fields.parallel.label"), type: "number", min: 1, unit: t("settings.sections.queue.fields.parallel.unit"), slider: { min: 1, max: 10 } },
         backoff_factor: {
           label: t("settings.sections.queue.fields.backoffFactor.label"),
           description: t("settings.sections.queue.fields.backoffFactor.description"),
           type: "number",
           step: 0.5,
+          slider: { min: 1, max: 5, step: 0.5 },
         },
         processing_timeout: {
           label: t("settings.sections.queue.fields.processingTimeout.label"),
@@ -124,6 +127,7 @@ function useSections(): Record<string, SectionDef> {
           type: "number",
           min: 30,
           unit: t("settings.sections.queue.fields.processingTimeout.unit"),
+          slider: { min: 60, max: 600, step: 30 },
         },
         max_auto_retries: {
           label: t("settings.sections.queue.fields.maxAutoRetries.label"),
@@ -138,12 +142,12 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.limits.description"),
       icon: "🛡",
       fields: {
-        views_per_minute: { label: t("settings.sections.limits.fields.viewsPerMinute.label"), type: "number", min: 0 },
-        views_per_hour: { label: t("settings.sections.limits.fields.viewsPerHour.label"), type: "number", min: 0 },
-        views_per_day: { label: t("settings.sections.limits.fields.viewsPerDay.label"), type: "number", min: 0 },
-        searches_per_hour: { label: t("settings.sections.limits.fields.searchesPerHour.label"), type: "number", min: 0 },
+        views_per_minute: { label: t("settings.sections.limits.fields.viewsPerMinute.label"), type: "number", min: 0, slider: { min: 1, max: 15 } },
+        views_per_hour: { label: t("settings.sections.limits.fields.viewsPerHour.label"), type: "number", min: 0, slider: { min: 10, max: 300, step: 10 } },
+        views_per_day: { label: t("settings.sections.limits.fields.viewsPerDay.label"), type: "number", min: 0, slider: { min: 50, max: 2000, step: 50 } },
+        searches_per_hour: { label: t("settings.sections.limits.fields.searchesPerHour.label"), type: "number", min: 0, slider: { min: 1, max: 15 } },
         search_results_max: { label: t("settings.sections.limits.fields.searchResultsMax.label"), type: "number", min: 1 },
-        search_delay: { label: t("settings.sections.limits.fields.searchDelay.label"), type: "number", min: 1, unit: t("settings.sections.limits.fields.searchDelay.unit") },
+        search_delay: { label: t("settings.sections.limits.fields.searchDelay.label"), type: "number", min: 1, unit: t("settings.sections.limits.fields.searchDelay.unit"), slider: { min: 60, max: 600, step: 30 } },
       },
     },
     view: {
@@ -151,8 +155,8 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.view.description"),
       icon: "❤️",
       fields: {
-        min_delay: { label: t("settings.sections.view.fields.minDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.minDelay.unit") },
-        max_delay: { label: t("settings.sections.view.fields.maxDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.maxDelay.unit") },
+        min_delay: { label: t("settings.sections.view.fields.minDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.minDelay.unit"), slider: { min: 5, max: 120, step: 5 } },
+        max_delay: { label: t("settings.sections.view.fields.maxDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.maxDelay.unit"), slider: { min: 30, max: 300, step: 10 } },
         auto_like: {
           label: t("settings.sections.view.fields.autoLike.label"),
           description: t("settings.sections.view.fields.autoLike.description"),
@@ -160,8 +164,8 @@ function useSections(): Record<string, SectionDef> {
         },
         like_emoji: {
           label: t("settings.sections.view.fields.likeEmoji.label"),
-          description: t("settings.sections.view.fields.likeEmoji.description"),
           type: "text",
+          emoji: ["👍", "❤️", "🔥", "😍", "😂", "😮", "😢", "👏", "💯", "🎉"],
         },
       },
     },
@@ -359,6 +363,25 @@ function FieldRow({
             </option>
           ))}
         </select>
+      ) : def.type === "number" && def.slider ? (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400">{def.slider.min}{def.unit ? ` ${def.unit}` : ""}</span>
+            <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-sm font-semibold tabular-nums text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
+              {String(value ?? def.slider.min)} {def.unit || ""}
+            </span>
+            <span className="text-xs text-slate-400">{def.slider.max}{def.unit ? ` ${def.unit}` : ""}</span>
+          </div>
+          <input
+            type="range"
+            min={def.slider.min}
+            max={def.slider.max}
+            step={def.slider.step || 1}
+            value={Number(value ?? def.slider.min)}
+            onChange={(e) => onChange(Number(e.target.value))}
+            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
+          />
+        </div>
       ) : def.type === "number" ? (
         <div className="flex gap-2">
           <input
@@ -381,6 +404,23 @@ function FieldRow({
               {def.command.label}
             </button>
           )}
+        </div>
+      ) : def.emoji ? (
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          {def.emoji.map((em) => (
+              <button
+                key={em}
+                type="button"
+                onClick={() => onChange(em)}
+                className={`flex h-10 w-10 items-center justify-center rounded-xl text-xl transition-all ${
+                  value === em
+                    ? "scale-110 bg-emerald-100 shadow-sm ring-2 ring-emerald-500 dark:bg-emerald-500/20 dark:ring-emerald-400"
+                    : "bg-slate-100 opacity-50 hover:opacity-80 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700"
+                }`}
+              >
+                {em}
+              </button>
+            ))}
         </div>
       ) : (
         <div className="flex gap-2">

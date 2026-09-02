@@ -24,6 +24,13 @@ def _run_migrations() -> None:
     (adding a column to an *existing* table).
     """
     with engine.begin() as conn:
+        # Set a short lock timeout so we don't block startup if another
+        # connection already holds a lock on the table.
+        try:
+            conn.execute(text("SET lock_timeout = '3s'"))
+        except Exception:
+            pass  # SQLite doesn't support this
+
         # --- is_premium on telegram_accounts ---
         try:
             conn.execute(text(
@@ -31,8 +38,14 @@ def _run_migrations() -> None:
                 "is_premium BOOLEAN NOT NULL DEFAULT false"
             ))
             logger.info("Migration: ensured is_premium column on telegram_accounts")
+        except Exception as e:
+            logger.debug("Migration: is_premium skip — %s", e)
+
+        # Reset lock_timeout
+        try:
+            conn.execute(text("RESET lock_timeout"))
         except Exception:
-            logger.debug("Migration: is_premium column already present or table missing")
+            pass
 
 
 def init_db() -> None:

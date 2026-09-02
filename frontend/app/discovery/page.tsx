@@ -326,49 +326,55 @@ export default function DiscoveryPage() {
             </div>
             <Switch checked={cfg.enabled} onChange={(v) => update({ enabled: v })} />
           </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                {t("discovery.checkEvery")}
-              </label>
-              <div className="mt-2 flex items-center gap-3">
-                <input
-                  type="range"
-                  min={1}
-                  max={60}
-                  value={intervalMin}
-                  onChange={(e) =>
-                    update({ search_interval: Math.max(1, Number(e.target.value)) * 60 })
-                  }
-                  className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
-                />
-                <span className="w-14 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+          <div className="grid gap-6 sm:grid-cols-2">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                  {t("discovery.checkEvery")}
+                </label>
+                <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-sm font-semibold tabular-nums text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
                   {intervalMin} {t("discovery.minutes")}
                 </span>
               </div>
-              <p className="mt-1 text-xs text-slate-400">
+              <input
+                type="range"
+                min={1}
+                max={60}
+                value={intervalMin}
+                onChange={(e) =>
+                  update({ search_interval: Math.max(1, Number(e.target.value)) * 60 })
+                }
+                className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
+              />
+              <div className="flex justify-between text-[11px] text-slate-400">
+                <span>1</span><span>60</span>
+              </div>
+              <p className="text-xs text-slate-400">
                 {t("discovery.minIntervalNote")}
               </p>
             </div>
-            <div>
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                {t("discovery.processPerSearch")}
-              </label>
-              <div className="mt-2 flex items-center gap-3">
-                <input
-                  type="range"
-                  min={50}
-                  max={200}
-                  step={10}
-                  value={cfg.search_results_max}
-                  onChange={(e) =>
-                    update({ search_results_max: Math.max(50, Number(e.target.value)) })
-                  }
-                  className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
-                />
-                <span className="w-14 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                  {t("discovery.processPerSearch")}
+                </label>
+                <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-sm font-semibold tabular-nums text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
                   {cfg.search_results_max}
                 </span>
+              </div>
+              <input
+                type="range"
+                min={50}
+                max={200}
+                step={10}
+                value={cfg.search_results_max}
+                onChange={(e) =>
+                  update({ search_results_max: Math.max(50, Number(e.target.value)) })
+                }
+                className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700"
+              />
+              <div className="flex justify-between text-[11px] text-slate-400">
+                <span>50</span><span>200</span>
               </div>
             </div>
           </div>

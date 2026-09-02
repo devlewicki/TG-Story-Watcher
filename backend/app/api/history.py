@@ -11,6 +11,7 @@ from ..db import get_db
 from ..models import ActivityLog, StoryView, TelegramAccount
 from .deps import require_api_token, current_user_id
 from .schemas import ActivityOut, ViewOut, activity_out
+from .timezone import user_now, user_today
 
 logger = logging.getLogger("storywatcher.api.history")
 
@@ -64,18 +65,18 @@ def list_views(
         q = q.filter(StoryView.status == status)
     if view_period:
         if view_period == "today":
-            start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            start = user_today(db, user_id)
             q = q.filter(StoryView.viewed_at >= start)
         elif view_period == "yesterday":
-            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            today = user_today(db, user_id)
             q = q.filter(
                 StoryView.viewed_at >= today - timedelta(days=1),
                 StoryView.viewed_at < today,
             )
         elif view_period == "week":
-            q = q.filter(StoryView.viewed_at >= datetime.now(timezone.utc) - timedelta(days=7))
+            q = q.filter(StoryView.viewed_at >= user_now(db, user_id) - timedelta(days=7))
         elif view_period == "month":
-            q = q.filter(StoryView.viewed_at >= datetime.now(timezone.utc) - timedelta(days=30))
+            q = q.filter(StoryView.viewed_at >= user_now(db, user_id) - timedelta(days=30))
     return [_view_out(v) for v in q.offset(offset).limit(limit).all()]
 
 
