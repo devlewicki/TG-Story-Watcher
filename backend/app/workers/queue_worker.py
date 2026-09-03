@@ -122,7 +122,15 @@ async def drain_queue(db: Session, account: TelegramAccount) -> None:
     """Process all currently-due queue entries for a single account."""
     if not account.session_path or account.status == AccountStatus.DISCONNECTED.value:
         return
-    client = await asyncio.wait_for(cm.connect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
+    try:
+        client = await asyncio.wait_for(cm.connect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
+    except (ConnectionError, OSError, TimeoutError) as exc:
+        logger.warning("drain_queue(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
+        try:
+            client = await asyncio.wait_for(cm.reconnect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
+        except Exception as reconnect_exc:
+            logger.error("drain_queue(%s) reconnect also failed: %s", account.id, reconnect_exc)
+            return
     if not client.is_connected():
         return
 
@@ -231,6 +239,17 @@ async def run_once() -> int:
                     if is_locked and _attempt < 2:
                         logger.warning("drain_queue(%s) database locked, retrying (attempt %d)", account.id, _attempt + 1)
                         db.rollback()
+                        await asyncio.sleep(2 ** _attempt)
+                        continue
+                    # Connection errors: try a full reconnect before giving up.
+                    is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
+                    if is_conn and _attempt < 2:
+                        logger.warning("drain_queue(%s) connection error, reconnecting (attempt %d): %s", account.id, _attempt + 1, exc)
+                        db.rollback()
+                        try:
+                            await cm.reconnect(account)
+                        except Exception:
+                            logger.debug("reconnect for account %s failed", account.id, exc_info=True)
                         await asyncio.sleep(2 ** _attempt)
                         continue
                     logger.error("drain_queue(%s) failed: %s", account.id, exc)
