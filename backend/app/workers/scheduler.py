@@ -66,6 +66,18 @@ async def sync_account(account: TelegramAccount) -> int:
                 db.close()
                 await asyncio.sleep(2 ** _attempt)
                 continue
+            # Connection errors: force a full reconnect before retrying.
+            is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
+            if is_conn and _attempt < 2:
+                logger.warning("sync_account(%s) connection error, reconnecting (attempt %d): %s", account.id, _attempt + 1, exc)
+                db.rollback()
+                db.close()
+                try:
+                    await cm.reconnect(acc)
+                except Exception:
+                    logger.debug("reconnect for account %s failed", account.id, exc_info=True)
+                await asyncio.sleep(2 ** _attempt)
+                continue
             logger.error("sync_account(%s) failed: %s", account.id, exc)
             try:
                 acc = db.get(TelegramAccount, account.id)
@@ -212,7 +224,15 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         acc = db.get(TelegramAccount, account.id)
         if acc is None or not acc.session_path or acc.status == AccountStatus.DISCONNECTED.value:
             return
-        client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
+        try:
+            client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
+        except (ConnectionError, OSError, TimeoutError) as exc:
+            logger.warning("discover_account(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
+            try:
+                client = await asyncio.wait_for(cm.reconnect(acc), timeout=CONNECT_TIMEOUT)
+            except Exception as reconnect_exc:
+                logger.error("discover_account(%s) reconnect also failed: %s", account.id, reconnect_exc)
+                return
         if not client.is_connected() or not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
             return
         await cm.update_account_identity(acc, client)

@@ -175,6 +175,28 @@ async def connect(account):
     return client
 
 
+async def reconnect(account) -> TelegramClient:
+    """Force a clean disconnect + reconnect for an account's client.
+
+    Call this when the client is in a broken state (e.g. after HTTP 429,
+    'Cannot send requests while disconnected', or other transport errors).
+    Removes the cached client and builds a fresh one so Telethon's internal
+    state (connection, sender, etc.) is fully reset.
+    """
+    account_id = account.id
+    old = _clients.pop(account_id, None)
+    if old:
+        try:
+            await old.disconnect()
+        except Exception:
+            logger.debug("Telegram client disconnect during reconnect failed", exc_info=True)
+    client = build_client(account)
+    _clients[account_id] = client
+    await client.connect()
+    logger.info("reconnected Telegram client for account %s", account_id)
+    return client
+
+
 async def release_client(account_id: int):
     client = _clients.pop(account_id, None)
     if client:
