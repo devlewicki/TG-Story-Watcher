@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 
-from ..db import init_db
+from ..db import init_db, SessionLocal
 from . import queue_worker, scheduler
 
 logger = logging.getLogger("storywatcher.combined")
@@ -51,6 +51,38 @@ def _heartbeat_watchdog() -> None:
         time.sleep(5)
 
 
+def _cleanup_old_data() -> None:
+    """Remove old VIEWED queue items and stale activity logs to prevent
+    unbounded table growth.  Runs once per hour."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+        # Delete VIEWED queue items older than 7 days
+        result = db.execute(
+            text("DELETE FROM story_queue WHERE status = 'VIEWED' AND completed_at < NOW() - INTERVAL '7 days'")
+        )
+        if result.rowcount:
+            logger.info("cleanup: removed %d old VIEWED queue items", result.rowcount)
+        # Delete FAILED queue items older than 30 days (keep for debugging)
+        result = db.execute(
+            text("DELETE FROM story_queue WHERE status = 'FAILED' AND completed_at < NOW() - INTERVAL '30 days'")
+        )
+        if result.rowcount:
+            logger.info("cleanup: removed %d old FAILED queue items", result.rowcount)
+        # Delete activity logs older than 30 days (keep recent history)
+        result = db.execute(
+            text("DELETE FROM activity_logs WHERE created_at < NOW() - INTERVAL '30 days'")
+        )
+        if result.rowcount:
+            logger.info("cleanup: removed %d old activity log entries", result.rowcount)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("cleanup failed: %s", exc)
+    finally:
+        db.close()
+
+
 async def run() -> None:
     init_db()  # ensure tables exist even if the API hasn't booted yet
     sync_interval = float(os.environ.get("STORYWATCHER_SYNC_INTERVAL", "30"))
@@ -63,6 +95,7 @@ async def run() -> None:
     t.start()
 
     last_sync = 0.0
+    last_cleanup = 0.0
     consecutive_errors = 0
     discovery_task: asyncio.Task | None = None
 
@@ -73,12 +106,24 @@ async def run() -> None:
 
         # 1) Drain the view queue FIRST — this is time-sensitive (stories expire).
         try:
-            await queue_worker.run_once()
+            t0 = time.monotonic()
+            processed = await queue_worker.run_once()
+            elapsed = time.monotonic() - t0
+            if elapsed > 2 or processed:
+                logger.info("queue_worker: processed=%s elapsed=%.1fs", processed, elapsed)
         except Exception as exc:  # noqa: BLE001
             logger.exception("worker cycle error: %s", exc)
             cycle_had_error = True
 
-        # 2) Periodic story sync (respects its own interval).
+        # 2) Periodic cleanup of old VIEWED queue items and activity logs.
+        if now - last_cleanup >= 3600:  # every hour
+            try:
+                _cleanup_old_data()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cleanup error: %s", exc)
+            last_cleanup = now
+
+        # 3) Periodic story sync (respects its own interval).
         if now - last_sync >= sync_interval:
             try:
                 await scheduler.run_once()
@@ -88,13 +133,16 @@ async def run() -> None:
                 cycle_had_error = True
             last_sync = now
 
-        # 3) Global story discovery — run as a background task so it doesn't
+        # 4) Global story discovery — run as a background task so it doesn't
         #    block queue processing (discovery can take minutes due to
         #    FloodWait from Telegram's SearchPosts rate limit).
         if discovery_task is None or discovery_task.done():
             async def _run_discovery():
                 try:
+                    t0 = time.monotonic()
                     await scheduler.run_discovery_once()
+                    elapsed = time.monotonic() - t0
+                    logger.info("discovery cycle completed in %.1fs", elapsed)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("discovery cycle error: %s", exc)
             discovery_task = asyncio.create_task(_run_discovery())

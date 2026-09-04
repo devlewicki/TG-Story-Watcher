@@ -163,6 +163,13 @@ const ru = {
     mapLoading: "Загружаем карту…",
     venueSearch: "Искать здесь",
     venueSelected: "✓ В поиске — убрать",
+    geoRadiusTitle: "Поиск по радиусу",
+    geoRadiusDesc: "Искать истории в радиусе точки на карте",
+    geoMapTitle: "Карта и превью мест",
+    geoSearchToggle: "Искать по гео-радиусу",
+    geoSearchToggleDesc: "Найдёт истории в выбранном радиусе на карте",
+    summaryTitle: "Сводка поиска",
+    disabled: "отключено",
   },
 
   // Whitelist / Blacklist
