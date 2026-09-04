@@ -52,8 +52,8 @@ def _heartbeat_watchdog() -> None:
 
 
 def _cleanup_old_data() -> None:
-    """Remove old VIEWED queue items and stale activity logs to prevent
-    unbounded table growth.  Runs once per hour."""
+    """Remove old VIEWED queue items, stale activity logs, and excess
+    analytics snapshots to prevent unbounded table growth.  Runs once per hour."""
     db = SessionLocal()
     try:
         from sqlalchemy import text
@@ -75,6 +75,54 @@ def _cleanup_old_data() -> None:
         )
         if result.rowcount:
             logger.info("cleanup: removed %d old activity log entries", result.rowcount)
+        # Clean up analytics snapshots: keep only the last snapshot per story per day
+        # for the last 30 days.  Delete all snapshots older than 30 days, then
+        # deduplicate within the 30-day window (keep only the latest per story/day).
+        result = db.execute(
+            text("""
+                DELETE FROM story_stats_snapshots
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY story_id, DATE(collected_at)
+                                   ORDER BY collected_at DESC
+                               ) AS rn
+                        FROM story_stats_snapshots
+                        WHERE collected_at < NOW() - INTERVAL '30 days'
+                    ) sub
+                    WHERE rn > 1
+                )
+            """)
+        )
+        if result.rowcount:
+            logger.info("cleanup: removed %d old duplicate snapshots (>30d)", result.rowcount)
+        # Also delete snapshots older than 90 days entirely
+        result = db.execute(
+            text("DELETE FROM story_stats_snapshots WHERE collected_at < NOW() - INTERVAL '90 days'")
+        )
+        if result.rowcount:
+            logger.info("cleanup: removed %d very old snapshots (>90d)", result.rowcount)
+        # Deduplicate snapshots within the 30-day window (keep latest per story/day)
+        result = db.execute(
+            text("""
+                DELETE FROM story_stats_snapshots
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY story_id, DATE(collected_at)
+                                   ORDER BY collected_at DESC
+                               ) AS rn
+                        FROM story_stats_snapshots
+                        WHERE collected_at >= NOW() - INTERVAL '30 days'
+                    ) sub
+                    WHERE rn > 1
+                )
+            """)
+        )
+        if result.rowcount:
+            logger.info("cleanup: removed %d duplicate snapshots within 30d window", result.rowcount)
         db.commit()
     except Exception as exc:  # noqa: BLE001
         db.rollback()

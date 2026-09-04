@@ -13,6 +13,9 @@ being flagged.
 
 ## Features
 
+- **Single-parameter configuration** — set only "Views per day" (50–12,000); all other settings are auto-computed
+- Adaptive story search that adjusts frequency and result count based on queue state
+- Even distribution of views throughout the day with automatic speed correction
 - Local registration and login with first name, last name, email, and password
 - Passwords stored as secure PBKDF2 hashes; plain passwords are never stored
 - Multiple users with data isolation by authenticated user
@@ -28,6 +31,73 @@ being flagged.
 - Account analytics: active/archived own Stories, views, reactions, forwards, ER, viewer list, reaction breakdown, time-based snapshots, best Stories, period filters
 - Responsive web interface with dark/light theme
 - Docker Compose deployment with PostgreSQL, Redis, worker, frontend, and Nginx
+
+## How Auto-Configuration Works
+
+The entire system revolves around a single user parameter:
+
+```
+                ПРОСМОТРОВ В СУТКИ
+                        │
+                        ▼
+                 основной лимит
+                        │
+        ┌───────────────┼────────────────┐
+        ▼               ▼                ▼
+   скорость         поиск            очередь
+  просмотров
+        │               │                │
+        ▼               ▼                ▼
+  в час / минуту   интервал         параллельность
+        │               │                │
+        └───────────────┼────────────────┘
+                        ▼
+                задержки просмотра
+                        │
+                        ▼
+              равномерная работа
+                  в течение суток
+```
+
+### Derived Parameters
+
+| Parameter | Formula | Example (12,000/day) |
+|---|---|---|
+| Views per hour | `daily / 24` | 500 |
+| Views per minute | `ceil(daily / 1440)` | 9 |
+| Min delay | `max(3, min(20, avg_delay × 0.3))` | 3s |
+| Max delay | `max(10, min(120, avg_delay × 1.5))` | 11s |
+| Parallel workers | 1 / 2 / 3 based on daily threshold | 3 |
+| Monitoring interval | `max(15, min(60, 120 - daily/100))` | 15s |
+| Search frequency | Adaptive based on queue fill | 60–600s |
+| Search results | Adaptive based on queue gap | 10–200 |
+
+### Adaptive Search
+
+The discovery system continuously monitors queue state and adjusts:
+
+- **Queue empty** → search every 60 seconds, fetch maximum results
+- **Queue half-full** → search every 5 minutes, fetch moderate results
+- **Queue full** → search every 10 minutes, fetch minimal results
+- **Queue oversized** → skip search entirely
+- **Views nearly exhausted** → skip search entirely
+
+### Daily Budget Protection
+
+The daily limit is an absolute ceiling. Before every view:
+
+```
+if viewed_today >= daily_limit:
+    STOP
+```
+
+The system tracks views per account per day and pauses when the limit
+is reached. Changing the limit mid-day adjusts remaining capacity:
+
+```
+Before: 5000 limit, 3000 viewed
+After setting 12000: 9000 remaining
+```
 
 ## Screenshots
 
@@ -64,6 +134,10 @@ MTProto Telegram client
    │
    ▼
 Combined background worker
+   │
+   ├── Queue processor (adaptive delays)
+   ├── Scheduler (story sync)
+   └── Discovery controller (adaptive search)
 ```
 
 ## Requirements
@@ -176,17 +250,47 @@ application and must be set in `.env` before starting.
    number → enter the code from Telegram → enter 2FA password if prompted.
 4. **Verify.** The account card should show your name, username, phone,
    and Telegram ID.
-5. **Configure.** Set up tags, rules, monitoring settings, queue limits,
-   and discovery parameters on the Settings and Discovery pages.
-6. **Monitor.** Toggle monitoring ON for connected accounts. The worker
+5. **Configure.** Set "Views per day" in Settings → Limits. All other
+   parameters (delays, search frequency, queue parallelism) are
+   automatically computed.
+6. **Add sources.** Go to Story Search → add hashtags, places, or
+   enable geo-radius search.
+7. **Monitor.** Toggle monitoring ON for connected accounts. The worker
    starts discovering and viewing Stories automatically.
-7. **Analyze.** Check the Analytics page for views, reactions, forwards,
+8. **Analyze.** Check the Analytics page for views, reactions, forwards,
    ER, and viewer lists on your own Stories.
-8. **Manage.** Use Whitelist/Blacklist to control which authors are
+9. **Manage.** Use Whitelist/Blacklist to control which authors are
    processed. Use Queue to track and manage pending view actions.
 
 > A Telegram account belongs to the application user who authorizes it.
 > The same Telegram account cannot be attached to another application user.
+
+## Settings Reference
+
+### User-Configured Parameters
+
+| Section | Parameter | Range | Description |
+|---|---|---|---|
+| Limits | Views per day | 50–12,000 | Maximum views per 24 hours |
+| View | Auto-like | on/off | Like stories after viewing |
+| View | Like emoji | 👍 ❤️ 🔥 etc. | Emoji for auto-reactions |
+| Discovery | Auto search | on/off | Enable automatic story search |
+| Discovery | Hashtags | text | Tags to search for |
+| Discovery | Places & cities | text | Locations to search |
+| Discovery | Geo-radius | map | Search within radius |
+
+### Auto-Computed Parameters (not editable)
+
+| Section | Parameter | Derived from |
+|---|---|---|
+| Limits | Views per hour | Views per day / 24 |
+| Limits | Views per minute | Views per day / 1440 |
+| View | Min delay | Views per day (uniform distribution) |
+| View | Max delay | Views per day (uniform distribution) |
+| Queue | Parallel workers | Views per day (1–3) |
+| Monitoring | Check interval | Views per day (15–60s) |
+| Discovery | Search interval | Queue state (adaptive) |
+| Discovery | Results per search | Queue gap (adaptive) |
 
 ## Environment Variables
 
@@ -216,9 +320,9 @@ See `.env.example` for a ready-to-copy template with all variables and descripti
 | `TELEGRAM_PROXY_SECRET` | — | MTProto proxy secret |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:9000/api` | Frontend API base URL (set to `/api` in Docker via Nginx) |
 
-Queue defaults (delay, batch, session limit, etc.) and display preferences
-(language, time zone) are configured via the Settings page, stored in the
-database, and saved automatically on every change.
+User settings (language, time zone, daily views limit, filters) are configured
+via the Settings page, stored in the database, and saved automatically on every
+change. All technical parameters are derived from the daily views limit.
 
 ## Pages
 
@@ -230,7 +334,7 @@ database, and saved automatically on every change.
 | `/queue` | Queue | Current view task queue: status, priority, errors |
 | `/history` | History | Full log of all views and system actions |
 | `/analytics` | Analytics | Own Stories analytics: views, reactions, ER, viewers |
-| `/settings` | Settings | App configuration: language, theme, Telegram, monitoring, limits, filters |
+| `/settings` | Settings | App configuration: language, theme, Telegram, limits, filters |
 | `/discovery` | Story Search | Auto-search by hashtags and geolocation, collected places map |
 | `/whitelist` | Whitelist | Manage allowed authors list |
 | `/blacklist` | Blacklist | Manage blocked authors list |
@@ -244,24 +348,25 @@ instead of retrying in a tight loop — but you should be aware:
 
 - Excessive viewing may trigger `FLOOD_WAIT` status on your account
 - The app respects Telegram's rate limiting and pauses accordingly
-- Configure rate limits in Settings → Limits to stay safe
-- Recommended: keep views per hour reasonable (start with 20–30)
+- Rate limits are automatically computed from your daily views setting
+- The system distributes views evenly throughout the day to avoid spikes
 
 Going beyond safe limits is at your own risk — Telegram may restrict
 or ban accounts that exhibit bot-like behavior.
 
 ## Queue Safety
 
-- All view actions run sequentially with configurable delays between requests
-- Before starting — mandatory confirmation with the user count and settings
+- All view actions run sequentially with auto-computed delays between requests
+- Daily limit enforced before every view — never exceeded
 - Whitelist is excluded at queue creation and re-checked before every action
 - Blacklisted authors are always skipped
 - Safe Mode: re-checks the actual state before each view
 - Primary rate limit → the queue pauses until reset (auto-resumes)
 - Secondary rate limit → Retry-After or exponential backoff
 - Transient (network) errors retry with delays (up to the configured maximum)
-- After a server restart the queue never resumes automatically — only via the Resume button
-- Configurable session limits, batch pauses, and backoff factors
+- After a server restart the queue resumes automatically (tracks daily progress)
+- Stale PROCESSING items are auto-recovered after timeout
+- Adaptive parallelism (1–3 workers) based on daily views limit
 
 ## Project Structure
 
@@ -275,7 +380,7 @@ TG-Story-Watcher/
 │   │   ├── queue/                 # View queue
 │   │   ├── history/               # Operation history
 │   │   ├── analytics/             # Account analytics
-│   │   ├── settings/              # App settings
+│   │   ├── settings/              # App settings (single-param config)
 │   │   ├── discovery/             # Story search / hashtags / geo
 │   │   ├── whitelist/             # Whitelist
 │   │   ├── blacklist/             # Blacklist
@@ -290,14 +395,15 @@ TG-Story-Watcher/
 │   │   ├── analytics/             # Analytics service
 │   │   ├── filters/               # Filter engine
 │   │   ├── queue/                 # Queue processor
-│   │   ├── services/              # Business logic
+│   │   ├── services/              # Business logic (settings with auto-derivation)
 │   │   ├── stories/               # Story monitoring and discovery
 │   │   ├── telegram/              # MTProto client (Telethon)
-│   │   ├── workers/               # Background workers (scheduler + queue)
+│   │   ├── workers/               # Background workers (adaptive scheduler + queue)
 │   │   ├── config.py              # Settings (pydantic-settings)
 │   │   ├── db.py                  # SQLAlchemy engine and sessions
 │   │   ├── main.py                # FastAPI application
 │   │   └── models.py              # ORM models
+│   ├── migrate_limits_derived.py  # Migration: recalculate derived settings
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── healthcheck.sh

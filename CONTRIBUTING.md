@@ -49,7 +49,8 @@ Frontend runs on http://localhost:3000 and proxies `/api` to the backend
 
 ### Running the Worker
 
-The background worker handles story sync and queue processing:
+The background worker handles story sync, queue processing, and adaptive
+discovery:
 
 ```bash
 cd backend
@@ -84,15 +85,16 @@ TG-Story-Watcher/
 │   │   ├── analytics/      # Analytics service
 │   │   ├── filters/        # Filter engine for story processing
 │   │   ├── queue/          # Queue processor
-│   │   ├── services/       # Business logic (settings, activity)
+│   │   ├── services/       # Business logic (settings with auto-derivation)
 │   │   ├── stories/        # Story monitoring and discovery
 │   │   ├── telegram/       # MTProto client (Telethon)
-│   │   ├── workers/        # Background workers (scheduler + queue)
+│   │   ├── workers/        # Background workers (adaptive scheduler + queue)
 │   │   ├── config.py       # pydantic-settings configuration
 │   │   ├── db.py           # SQLAlchemy engine and sessions
 │   │   ├── main.py         # FastAPI app entry point
 │   │   ├── models.py       # ORM models
 │   │   └── multitenancy.py # User auth, token, password hashing
+│   ├── migrate_limits_derived.py  # Migration: recalculate derived settings
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── healthcheck.sh
@@ -108,6 +110,28 @@ TG-Story-Watcher/
 ├── .env.example
 └── README.md
 ```
+
+## Auto-Configuration Architecture
+
+The system derives all technical parameters from a single user input:
+**Views per day** (50–12,000).
+
+### Key Files
+
+| File | Purpose |
+|---|---|
+| `backend/app/services/settings_service.py` | `compute_all_from_daily()` — derives limits, view delays, queue parallelism, monitoring interval |
+| `backend/app/workers/scheduler.py` | `_compute_adaptive_search_params()` — dynamic search interval and result count |
+| `backend/app/workers/queue_worker.py` | Recomputes rate limits from daily on each cycle |
+| `frontend/app/settings/page.tsx` | Single slider UI, instant recalculation on change |
+| `backend/migrate_limits_derived.py` | Migration script to recalculate all derived settings |
+
+### Adding New Derived Parameters
+
+1. Add the formula to `compute_all_from_daily()` in `settings_service.py`
+2. Add the key to the appropriate section dict in the return value
+3. Update the frontend `setField()` to compute the value for instant UI feedback
+4. Run the migration to update existing users
 
 ## Code Conventions
 
@@ -125,6 +149,8 @@ TG-Story-Watcher/
 - **Database:** `init_db()` creates tables on startup. For schema changes,
   modify `models.py` — Alembic can be added later.
 - **No raw SQL.** Use SQLAlchemy ORM queries.
+- **Settings derivation:** When adding new auto-computed parameters, always
+  derive from `views_per_day` in `compute_all_from_daily()`.
 
 ### Frontend (TypeScript/React)
 
@@ -136,6 +162,8 @@ TG-Story-Watcher/
 - **API calls:** Through `lib/api.ts` (`api.get`, `api.post`, etc.).
 - **Components:** Functional components with TypeScript props.
 - **Theme:** Dark/light support via `lib/theme.tsx`.
+- **Settings UI:** Use `readonly` field type for auto-computed values.
+  Only user-configurable parameters get sliders.
 
 ### Git
 
@@ -247,7 +275,7 @@ This starts 6 containers:
 | `postgres` | PostgreSQL 16 database |
 | `redis` | Redis 7 cache |
 | `backend` | FastAPI REST API (port 9000 internal) |
-| `worker` | Background story sync + queue processor |
+| `worker` | Background story sync + queue processor + adaptive discovery |
 | `frontend` | Next.js SSR frontend (port 3000 internal) |
 | `nginx` | Reverse proxy (exposes port 8081) |
 
@@ -263,6 +291,7 @@ http://your-server-ip:8081
 4. Enter your Telegram phone number
 5. Enter the code from Telegram
 6. Toggle monitoring ON
+7. Go to Settings → set "Views per day" (all other settings auto-computed)
 
 ### Updating
 
