@@ -166,12 +166,93 @@ _hashtag_offset: dict[int, int] = {}
 _geo_venue_offset: dict[int, int] = {}
 
 
-async def run_discovery_once() -> None:
-    """Run per-user story discovery (hashtags / geo) when due or when forced.
+def _compute_adaptive_search_params(db, user_id: int) -> dict:
+    """Compute adaptive search interval and result count based on queue state.
 
-    Each web-app user has their own discovery settings (hashtags, locations,
-    interval).  We iterate over all active accounts grouped by user_id and
-    run discovery with the settings belonging to that user.
+    Returns dict with keys: interval, search_results_max, should_search.
+    """
+    from datetime import datetime, timezone
+    from ..models import StoryQueue, StoryView
+    from sqlalchemy import func
+
+    svc = SettingsService(db, user_id)
+    limits = svc.get("limits")
+    daily_limit = int(limits.get("views_per_day", 800))
+
+    # Get account IDs for this user
+    acc_ids = [
+        a.id for a in db.query(TelegramAccount.id)
+        .filter(TelegramAccount.user_id == user_id, TelegramAccount.monitoring.is_(True))
+        .all()
+    ]
+    if not acc_ids:
+        return {"interval": 300, "search_results_max": 50, "should_search": False}
+
+    # Queue size: pending + waiting items
+    queue_size = (
+        db.query(func.count(StoryQueue.id))
+        .filter(StoryQueue.account_id.in_(acc_ids), StoryQueue.status.in_(["PENDING", "WAITING_DELAY"]))
+        .scalar() or 0
+    )
+
+    # Views completed today
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    views_today = (
+        db.query(func.count(StoryView.id))
+        .filter(StoryView.account_id.in_(acc_ids), StoryView.viewed_at >= today_start)
+        .scalar() or 0
+    )
+
+    views_remaining = max(0, daily_limit - views_today)
+
+    # Target queue size: ~2 hours of buffer at the required rate
+    # hourly_rate = daily_limit / 24
+    # target = hourly_rate * 2 (2-hour buffer)
+    hourly_rate = daily_limit / 24.0
+    target_queue = max(10, int(hourly_rate * 2))
+
+    # Don't search if almost nothing remaining
+    if views_remaining < 10:
+        return {"interval": 600, "search_results_max": 0, "should_search": False}
+
+    # Don't search if queue is way oversized
+    if queue_size >= target_queue * 2:
+        return {"interval": 600, "search_results_max": 0, "should_search": False}
+
+    # Compute needed tasks
+    needed = max(0, target_queue - queue_size)
+
+    # Adaptive interval based on queue fullness
+    ratio = queue_size / max(target_queue, 1)
+    if ratio < 0.2:
+        interval = 60       # Queue almost empty → search every minute
+    elif ratio < 0.5:
+        interval = 120      # Queue low → every 2 minutes
+    elif ratio < 0.8:
+        interval = 300      # Queue moderate → every 5 minutes
+    else:
+        interval = 600      # Queue nearly full → every 10 minutes
+
+    # Cap results: don't fetch more than needed + small buffer
+    search_results_max = min(200, max(10, needed + 10))
+
+    return {
+        "interval": interval,
+        "search_results_max": search_results_max,
+        "should_search": True,
+        "queue_size": queue_size,
+        "views_today": views_today,
+        "views_remaining": views_remaining,
+        "target_queue": target_queue,
+    }
+
+
+async def run_discovery_once() -> None:
+    """Run per-user story discovery with adaptive scheduling.
+
+    Each web-app user has their own discovery settings (hashtags, locations).
+    The search interval and result count are computed dynamically based on
+    queue state and daily views progress.
     """
     db = SessionLocal()
     try:
@@ -194,9 +275,6 @@ async def run_discovery_once() -> None:
     now = time.monotonic()
 
     # Collect (account, cfg) pairs for users that are due for discovery.
-    # We build a flat list first so that accounts from different users are
-    # interleaved — otherwise one user with many hashtags/venues starves
-    # the others.
     pending: list[tuple[TelegramAccount, dict]] = []
     for uid, accs in user_accounts.items():
         db2 = SessionLocal()
@@ -205,7 +283,15 @@ async def run_discovery_once() -> None:
             cfg = svc.get("discovery")
             if not cfg.get("enabled"):
                 continue
-            interval = max(int(cfg.get("search_interval", 300)), 60)
+
+            # Compute adaptive search parameters
+            adaptive = _compute_adaptive_search_params(db2, uid)
+            if not adaptive["should_search"]:
+                logger.debug("discovery: user %d — search not needed (queue=%d, remaining=%d)",
+                             uid, adaptive.get("queue_size", 0), adaptive.get("views_remaining", 0))
+                continue
+
+            interval = adaptive["interval"]
             force = bool(cfg.pop("force_next", False))
             if force:
                 svc.set("discovery", cfg)  # clear the flag
@@ -213,6 +299,15 @@ async def run_discovery_once() -> None:
             if not force and (now - last < interval):
                 continue
             _last_discovery_ts[uid] = now
+
+            # Inject adaptive search_results_max into cfg for _discover_account
+            cfg["search_results_max"] = adaptive["search_results_max"]
+            logger.info(
+                "discovery: user %d — searching (interval=%ds, results=%d, queue=%d/%d, views=%d/%d)",
+                uid, interval, adaptive["search_results_max"],
+                adaptive.get("queue_size", 0), adaptive.get("target_queue", 0),
+                adaptive.get("views_today", 0), adaptive.get("views_remaining", 0) + adaptive.get("views_today", 0),
+            )
         finally:
             db2.close()
         for acc in accs:
