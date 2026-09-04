@@ -163,6 +163,13 @@ const en = {
     mapLoading: "Loading map…",
     venueSearch: "Search here",
     venueSelected: "✓ In search — remove",
+    geoRadiusTitle: "Geo-radius search",
+    geoRadiusDesc: "Search within a radius of a point on the map",
+    geoMapTitle: "Map & venue preview",
+    geoSearchToggle: "Search by geo-radius",
+    geoSearchToggleDesc: "Find stories within the selected radius on the map",
+    summaryTitle: "Search summary",
+    disabled: "disabled",
   },
 
   // Whitelist / Blacklist

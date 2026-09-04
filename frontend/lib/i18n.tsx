@@ -25,20 +25,24 @@ function pluralize(lang: Lang, forms: PluralForms, n: number): string {
   return n === 1 ? forms.one : forms.few;
 }
 
-// Interpolation: replaces {key} and handles plural {one|few|many} forms
+// Interpolation: replaces {key} and handles plural {one:story|few:stories|many:stories} forms
 function interpolate(
   template: string,
   vars: Record<string, string | number>,
   lang: Lang
 ): string {
-  return template.replace(/\{(\w+)(?:\|(\w+:\{?\w+\}?)*)\}/g, (match, key, _rest) => {
-    // Handle plural forms like {one:story|few:stories|many:stories}
-    if (match.includes(":")) {
-      const parts = match.slice(1, -1).split("|");
+  // Match {key} or {numKey:one:text|few:text|many:text}
+  return template.replace(/\{([^}]+)\}/g, (match, inner) => {
+    // Plural forms: {count:one:story|few:stories|many:stories}
+    // The first part before the first colon may be the numeric key
+    if (inner.includes(":")) {
+      const parts = inner.split("|");
       const forms: PluralForms = { one: "", few: "", many: "" };
       const numKey = parts.find((p: string) => /^\d+$/.test(p.split(":")[0]))?.split(":")[0];
       for (const part of parts) {
-        const [form, text] = part.split(":");
+        const colonIdx = part.indexOf(":");
+        const form = part.substring(0, colonIdx);
+        const text = part.substring(colonIdx + 1);
         if (form === "one") forms.one = text;
         else if (form === "few") forms.few = text;
         else if (form === "many") forms.many = text;
@@ -46,7 +50,7 @@ function interpolate(
       const n = numKey ? Number(vars[numKey]) : 0;
       return pluralize(lang, forms, n);
     }
-    const val = vars[key];
+    const val = vars[inner];
     return val !== undefined ? String(val) : match;
   });
 }

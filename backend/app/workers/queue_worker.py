@@ -118,10 +118,11 @@ ACCOUNT_CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
 ACCOUNT_DRAIN_TIMEOUT = 300  # seconds to wait for full drain_queue per account
 
 
-async def drain_queue(db: Session, account: TelegramAccount) -> None:
-    """Process all currently-due queue entries for a single account."""
+async def drain_queue(db: Session, account: TelegramAccount) -> int:
+    """Process all currently-due queue entries for a single account.
+    Returns the number of successfully processed items."""
     if not account.session_path or account.status == AccountStatus.DISCONNECTED.value:
-        return
+        return 0
     try:
         client = await asyncio.wait_for(cm.connect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
     except (ConnectionError, OSError, TimeoutError) as exc:
@@ -143,16 +144,23 @@ async def drain_queue(db: Session, account: TelegramAccount) -> None:
 
     svc = SettingsService(db, account.user_id)
     limits = svc.get("limits")
-    per_min = int(limits.get("views_per_minute", 10))
-    per_hour = int(limits.get("views_per_hour", 200))
-    per_day = int(limits.get("views_per_day", 1500))
+    per_day = int(limits.get("views_per_day", 800))
+    # Recompute hourly and minute limits from daily to ensure consistency
+    # Use floor division to avoid exceeding the daily limit
+    per_hour = per_day // 24
+    per_min = per_day // 1440
+    # Ensure at least 1 for per_min if daily > 0
+    if per_day > 0 and per_min == 0:
+        per_min = 1
     parallel = max(int(svc.get("queue").get("parallel", 1)), 1)
 
     limiter = RateLimiter(db)
 
     # Enforce per-day budget first.
-    if limiter.count_today(account.id) >= per_day:
-        logger.info("account %s at daily view limit (%d)", account.id, per_day)
+    today_count = limiter.count_today(account.id)
+    logger.debug("drain_queue(%s) today=%d per_day=%d", account.id, today_count, per_day)
+    if today_count >= per_day:
+        logger.info("account %s at daily view limit (%d/%d)", account.id, today_count, per_day)
         account.status = AccountStatus.PAUSED.value
         db.commit()
         return
@@ -168,8 +176,9 @@ async def drain_queue(db: Session, account: TelegramAccount) -> None:
     )
 
     items = _due_items(db, account.id, max_items=int(qcfg.get("max_tasks", 25)))
+    logger.info("drain_queue(%s) due_items=%d today=%d/%d", account.id, len(items), today_count, per_day)
     if not items:
-        return
+        return 0
 
     semaphore = asyncio.Semaphore(parallel)
     results = []
@@ -190,6 +199,8 @@ async def drain_queue(db: Session, account: TelegramAccount) -> None:
 
     await asyncio.gather(*(_handle(i) for i in items))
 
+    processed_count = len([r for r in results if isinstance(r, dict) and r.get("status") == "VIEWED"])
+
     # If any FloodWait was hit, back off before the next sweep.
     flood = [r for r in results if isinstance(r, dict) and r.get("flood_wait")]
     if flood:
@@ -201,6 +212,7 @@ async def drain_queue(db: Session, account: TelegramAccount) -> None:
     elif account.status in (AccountStatus.ACTIVE.value,):
         account.status = AccountStatus.ACTIVE.value
         db.commit()
+    return processed_count
 
 
 async def run_once() -> int:
@@ -221,7 +233,8 @@ async def run_once() -> int:
                 continue
             for _attempt in range(3):
                 try:
-                    await asyncio.wait_for(drain_queue(db, account), timeout=ACCOUNT_DRAIN_TIMEOUT)
+                    processed = await asyncio.wait_for(drain_queue(db, account), timeout=ACCOUNT_DRAIN_TIMEOUT)
+                    total += processed
                     # drain_queue may legitimately leave the account limited
                     # (daily budget exhausted -> PAUSED, hourly budget / flood wait
                     # -> FLOOD_WAIT). Don't overwrite those states back to ACTIVE.

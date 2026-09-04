@@ -7,7 +7,7 @@ import { Card, CardHeader, ErrorBanner, Spinner, Switch } from "@/components/ui"
 
 type SettingsMap = Record<string, Record<string, unknown>>;
 
-type FieldType = "bool" | "number" | "text" | "select";
+type FieldType = "bool" | "number" | "text" | "select" | "readonly";
 
 type FieldDef = {
   label: string;
@@ -32,7 +32,8 @@ type SectionDef = {
 };
 
 // The discovery section is managed on its own page (Story Search).
-const HIDDEN_SECTIONS = new Set(["discovery"]);
+// Queue is fully automatic — no user controls needed.
+const HIDDEN_SECTIONS = new Set(["discovery", "queue"]);
 
 function useSections(): Record<string, SectionDef> {
   const { t } = useTranslation();
@@ -94,7 +95,6 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.monitoring.description"),
       icon: "📡",
       fields: {
-        check_interval: { label: t("settings.sections.monitoring.fields.checkInterval.label"), type: "number", unit: t("settings.sections.monitoring.fields.checkInterval.unit"), slider: { min: 10, max: 120, step: 5 } },
         realtime: {
           label: t("settings.sections.monitoring.fields.realtime.label"),
           description: t("settings.sections.monitoring.fields.realtime.description"),
@@ -142,12 +142,9 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.limits.description"),
       icon: "🛡",
       fields: {
-        views_per_minute: { label: t("settings.sections.limits.fields.viewsPerMinute.label"), type: "number", min: 0, slider: { min: 1, max: 15 } },
-        views_per_hour: { label: t("settings.sections.limits.fields.viewsPerHour.label"), type: "number", min: 0, slider: { min: 10, max: 300, step: 10 } },
-        views_per_day: { label: t("settings.sections.limits.fields.viewsPerDay.label"), type: "number", min: 0, slider: { min: 50, max: 2000, step: 50 } },
-        searches_per_hour: { label: t("settings.sections.limits.fields.searchesPerHour.label"), type: "number", min: 0, slider: { min: 1, max: 15 } },
-        search_results_max: { label: t("settings.sections.limits.fields.searchResultsMax.label"), type: "number", min: 1 },
-        search_delay: { label: t("settings.sections.limits.fields.searchDelay.label"), type: "number", min: 1, unit: t("settings.sections.limits.fields.searchDelay.unit"), slider: { min: 60, max: 600, step: 30 } },
+        views_per_minute: { label: t("settings.sections.limits.fields.viewsPerMinute.label"), type: "readonly" },
+        views_per_hour: { label: t("settings.sections.limits.fields.viewsPerHour.label"), type: "readonly" },
+        views_per_day: { label: t("settings.sections.limits.fields.viewsPerDay.label"), type: "number", min: 0, slider: { min: 50, max: 12000, step: 50 } },
       },
     },
     view: {
@@ -155,8 +152,6 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.view.description"),
       icon: "❤️",
       fields: {
-        min_delay: { label: t("settings.sections.view.fields.minDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.minDelay.unit"), slider: { min: 5, max: 120, step: 5 } },
-        max_delay: { label: t("settings.sections.view.fields.maxDelay.label"), type: "number", min: 0, unit: t("settings.sections.view.fields.maxDelay.unit"), slider: { min: 30, max: 300, step: 10 } },
         auto_like: {
           label: t("settings.sections.view.fields.autoLike.label"),
           description: t("settings.sections.view.fields.autoLike.description"),
@@ -205,6 +200,7 @@ export default function SettingsPage() {
     api
       .get<SettingsMap>("/settings")
       .then((d) => {
+        // Backend now auto-derives all values from daily, just use them
         setAll(d);
         setSaveState("saved");
       })
@@ -222,6 +218,43 @@ export default function SettingsPage() {
       ...all,
       [section]: { ...all[section], [key]: value },
     };
+
+    // Auto-calculate all derived parameters from daily limit
+    if (section === "limits" && key === "views_per_day") {
+      const daily = Math.max(50, Math.min(12000, Number(value) || 0));
+      if (daily > 0) {
+        const viewsPerHour = Math.floor(daily / 24);
+        const viewsPerMinute = Math.ceil(daily / 1440);
+        const avgDelay = 86400 / daily;
+        const minDelay = Math.max(3, Math.min(20, Math.round(avgDelay * 0.3)));
+        const maxDelay = Math.max(10, Math.min(120, Math.round(avgDelay * 1.5)));
+        const parallel = daily >= 8000 ? 3 : daily >= 3000 ? 2 : 1;
+        const checkInterval = Math.max(15, Math.min(60, 120 - Math.floor(daily / 100)));
+        const searchesPerHour = Math.max(1, Math.min(10, Math.floor(daily / 1500)));
+        const searchDelay = Math.max(60, Math.min(600, 900 - Math.floor(daily / 20)));
+
+        next.limits = {
+          ...next.limits,
+          views_per_day: daily,
+          views_per_hour: viewsPerHour,
+          views_per_minute: viewsPerMinute,
+          searches_per_hour: searchesPerHour,
+          search_results_max: 50,
+          search_delay: searchDelay,
+        };
+        next.view = { ...next.view, min_delay: minDelay, max_delay: maxDelay };
+        next.queue = {
+          ...next.queue,
+          max_tasks: 50,
+          parallel,
+          backoff_factor: 2.0,
+          processing_timeout: 300,
+          max_auto_retries: 3,
+        };
+        next.monitoring = { ...next.monitoring, check_interval: checkInterval };
+      }
+    }
+
     setAll(next);
     // If language changed, update localStorage and notify I18nProvider
     if (section === "general" && key === "language" && (value === "ru" || value === "en")) {
@@ -324,6 +357,22 @@ function FieldRow({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
+  // Read-only field: shows only label and computed value, no slider or input
+  if (def.type === "readonly") {
+    return (
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
+            {def.label}
+          </div>
+        </div>
+        <span className="rounded-lg bg-slate-100 px-3 py-1.5 text-sm font-semibold tabular-nums text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+          {String(value ?? 0)}
+        </span>
+      </div>
+    );
+  }
+
   if (def.type === "bool") {
     return (
       <div className="flex items-center justify-between gap-3">

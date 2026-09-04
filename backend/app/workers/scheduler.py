@@ -48,7 +48,7 @@ async def sync_account(account: TelegramAccount) -> int:
                 # auth data and makes the account disappear.
                 db.commit()
                 return 0
-            await cm.update_account_identity(acc, client)
+            await _maybe_update_identity(acc, client)
             monitor = StoryMonitor(client, acc, db)
             lookup = monitor._load_sets()
             await load_contacts_into(client, acc, lookup)
@@ -112,7 +112,7 @@ async def run_analytics_once() -> None:
             if acc is not None and acc.session_path and acc.status not in (AccountStatus.DISCONNECTED.value, AccountStatus.AUTH_REQUIRED.value):
                 client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
                 if client.is_connected() and await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
-                    await cm.update_account_identity(acc, client)
+                    await _maybe_update_identity(acc, client)
                     local.commit()
                     await collect_account(acc.id, local, client)
         except Exception as exc:  # noqa: BLE001
@@ -139,6 +139,21 @@ async def run_once() -> None:
 # Per-user discovery timing: {user_id: last_run_monotonic}
 _last_discovery_ts: dict[int, float] = {}
 
+# Cache for update_account_identity: {account_id: last_update_monotonic}
+# Avoids calling get_me() on Telegram every sync/discovery/analytics cycle.
+_identity_last_update: dict[int, float] = {}
+IDENTITY_CACHE_TTL = 600  # 10 minutes
+
+
+async def _maybe_update_identity(acc: TelegramAccount, client) -> None:
+    """Call update_account_identity at most once per IDENTITY_CACHE_TTL."""
+    now = time.monotonic()
+    last = _identity_last_update.get(acc.id, 0.0)
+    if now - last < IDENTITY_CACHE_TTL:
+        return
+    await cm.update_account_identity(acc, client)
+    _identity_last_update[acc.id] = now
+
 # Round-robin pointer per user so auto-added geo places are searched in
 # rotation across discovery cycles (bounded by the configured search budget)
 # instead of firing one stories.searchPosts call per place every cycle.
@@ -146,6 +161,9 @@ _auto_venue_offset: dict[int, int] = {}
 
 # Round-robin pointer for hashtags: search a subset each cycle.
 _hashtag_offset: dict[int, int] = {}
+
+# Round-robin pointer for geo-search venues: search a subset each cycle.
+_geo_venue_offset: dict[int, int] = {}
 
 
 async def run_discovery_once() -> None:
@@ -235,7 +253,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
                 return
         if not client.is_connected() or not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
             return
-        await cm.update_account_identity(acc, client)
+        await _maybe_update_identity(acc, client)
         monitor = StoryMonitor(client, acc, db)
         lookup = monitor._load_sets()
         await load_contacts_into(client, acc, lookup)
@@ -284,7 +302,60 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             _hashtag_offset[uid * 1000 + 1] = (l_offset + location_budget) % len(all_locations)
         else:
             manual_locations = []
-        locations = manual_locations + auto_locations
+
+        # Geo-search from saved radius: find venues within the configured
+        # radius of the saved center point and add them to the search list.
+        geo_venues: list[str] = []
+        # Read from legacy nested dict OR flattened top-level keys
+        geo_search_cfg = cfg.get("geo_search") or {}
+        geo_enabled = geo_search_cfg.get("enabled", False) or cfg.get("geo_search_enabled", False)
+        geo_lat = geo_search_cfg.get("lat") or cfg.get("geo_search_lat")
+        geo_lng = geo_search_cfg.get("lng") or cfg.get("geo_search_lng")
+        geo_radius = float(geo_search_cfg.get("radius_km", 0) or cfg.get("geo_search_radius_km", 0) or 10)
+        # Also enable geo if lat/lng are present (even if enabled flag was lost)
+        if not geo_enabled and geo_lat is not None and geo_lng is not None:
+            geo_enabled = True
+        if geo_enabled and geo_lat is not None and geo_lng is not None:
+            from ..models import GeoPlace
+            import math
+            _R = 6371.0
+            c_lat = float(geo_lat)
+            c_lng = float(geo_lng)
+            c_radius = geo_radius
+            # Bounding box (fast pre-filter)
+            lat_margin = c_radius / 111.0 + 0.5
+            lng_margin = c_radius / (111.0 * math.cos(math.radians(c_lat))) + 0.5
+            candidates = (
+                db.query(GeoPlace)
+                .filter(
+                    GeoPlace.lat.isnot(None),
+                    GeoPlace.long.isnot(None),
+                    GeoPlace.lat >= c_lat - lat_margin,
+                    GeoPlace.lat <= c_lat + lat_margin,
+                    GeoPlace.long >= c_lng - lng_margin,
+                    GeoPlace.long <= c_lng + lng_margin,
+                )
+                .all()
+            )
+            for p in candidates:
+                dlat = math.radians(p.lat - c_lat)
+                dlng = math.radians(p.long - c_lng)
+                a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(c_lat)) * math.cos(math.radians(p.lat)) * math.sin(dlng / 2) ** 2
+                dist = _R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                if dist <= c_radius and p.venue_id:
+                    geo_venues.append(f"venue:{p.venue_id}")
+            logger.info("geo-search: found %d venues within %.1fkm of (%.4f, %.4f)", len(geo_venues), c_radius, c_lat, c_lng)
+
+        # Apply budget to geo venues: rotate through them in batches
+        # to avoid flooding Telegram with hundreds of requests per cycle.
+        geo_budget = max(5, min(30, len(geo_venues) // 10 + 5)) if geo_venues else 0
+        if geo_venues and geo_budget > 0:
+            g_offset = _geo_venue_offset.get(uid, 0) % len(geo_venues)
+            geo_venues = (geo_venues[g_offset:] + geo_venues[:g_offset])[:geo_budget]
+            _geo_venue_offset[uid] = (g_offset + geo_budget) % len(geo_venues)
+            logger.info("geo-search: using %d/%d venues (budget=%d)", len(geo_venues), geo_budget, geo_budget)
+
+        locations = manual_locations + auto_locations + geo_venues
         # Geolocation first: it is the primary discovery mode and may be slow,
         # so big hashtag lists must not starve it.
         if locations:
