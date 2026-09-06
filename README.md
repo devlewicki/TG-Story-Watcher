@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="README.md"><b>English</b></a> · <a href="README_ru.md">Русский</a>
+</p>
+
 # TG Story Watcher
 
 A self-hosted web application for monitoring and automatically viewing
@@ -37,26 +41,24 @@ being flagged.
 The entire system revolves around a single user parameter:
 
 ```
-                ПРОСМОТРОВ В СУТКИ
-                        │
-                        ▼
-                 основной лимит
-                        │
-        ┌───────────────┼────────────────┐
-        ▼               ▼                ▼
-   скорость         поиск            очередь
-  просмотров
-        │               │                │
-        ▼               ▼                ▼
-  в час / минуту   интервал         параллельность
-        │               │                │
-        └───────────────┼────────────────┘
-                        ▼
-                задержки просмотра
-                        │
-                        ▼
-              равномерная работа
-                  в течение суток
+                VIEWS PER DAY
+                     │
+                     ▼
+              primary limit
+                     │
+     ┌───────────────┼────────────────┐
+     ▼               ▼                ▼
+  view speed     search           queue
+     │               │                │
+     ▼               ▼                ▼
+  per hour/min   interval       parallelism
+     │               │                │
+     └───────────────┼────────────────┘
+                     ▼
+              view delays
+                     ▼
+           even distribution
+              throughout day
 ```
 
 ### Derived Parameters
@@ -109,6 +111,26 @@ The backend uses optimized SQL queries to minimize latency and database load:
 - **Settings service** — `compute_all_from_daily()` results are LRU-cached to avoid repeated recomputation per request cycle
 - **Connection pooling** — PostgreSQL pool tuned to `pool_size=10`, `max_overflow=20`, `pool_recycle=1800s` for concurrent API + worker load
 - **Discovery rotation** — separate offset dicts per search mode (hashtags, locations, geo-venues) prevent key collisions
+
+### Backend Query Optimization
+
+| Endpoint | Before | After |
+|---|---|---|
+| `/dashboard` | 38 individual `COUNT(*)` queries (24h + 14d) | 2 aggregated queries with `EXTRACT(HOUR)` / `DATE()` |
+| `/stories` | Full table load into Python, sort + paginate in-memory | DB-level LEFT JOIN + `OFFSET/LIMIT` |
+| `/analytics/overview` | Per-story `_summary()` loop for viewers | Single `COUNT(*)` query |
+| `SettingsService.get()` | Repeated `compute_all_from_daily()` | LRU-cached (maxsize=64) |
+
+### Connection Pool (PostgreSQL)
+
+| Parameter | Value |
+|---|---|
+| `pool_size` | 10 |
+| `max_overflow` | 20 |
+| `pool_timeout` | 30s |
+| `pool_recycle` | 1800s |
+
+SQLite uses `SingletonThreadPool` (default) for local development.
 
 ## Testing
 
@@ -169,26 +191,6 @@ Combined background worker
    └── Discovery controller (adaptive search, geo/hashtag rotation)
 ```
 
-### Backend Query Optimization
-
-| Endpoint | Before | After |
-|---|---|---|
-| `/dashboard` | 38 individual `COUNT(*)` queries (24h + 14d) | 2 aggregated queries with `EXTRACT(HOUR)` / `DATE()` |
-| `/stories` | Full table load into Python, sort + paginate in-memory | DB-level LEFT JOIN + `OFFSET/LIMIT` |
-| `/analytics/overview` | Per-story `_summary()` loop for viewers | Single `COUNT(*)` query |
-| `SettingsService.get()` | Repeated `compute_all_from_daily()` | LRU-cached (maxsize=64) |
-
-### Connection Pool (PostgreSQL)
-
-| Parameter | Value |
-|---|---|
-| `pool_size` | 10 |
-| `max_overflow` | 20 |
-| `pool_timeout` | 30s |
-| `pool_recycle` | 1800s |
-
-SQLite uses `SingletonThreadPool` (default) for local development.
-
 ## Requirements
 
 To run with Docker:
@@ -212,15 +214,12 @@ git clone https://github.com/devlewicki/TG-Story-Watcher.git
 cd TG-Story-Watcher
 ```
 
-Repository: https://github.com/devlewicki/TG-Story-Watcher
-
 ### 2. Configure the environment
 
 ```bash
 cp .env.example .env
 ```
 
-The `.env.example` file contains all available variables with descriptions.
 At minimum, set Telegram API credentials (get them at https://my.telegram.org):
 
 ```dotenv
@@ -349,9 +348,9 @@ See `.env.example` for a ready-to-copy template with all variables and descripti
 | Variable | Default | Description |
 |---|---|---|
 | `APP_NAME` | `StoryWatcher` | Application name (display only) |
-| `SECRET_KEY` | `dev-secret-key` | Secret key for the app. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `SECRET_KEY` | `dev-secret-key` | Secret key for the app |
 | `DEBUG` | `false` | Enable debug mode (verbose logging) |
-| `STORYWATCHER_API_TOKEN` | — | API token protecting the web panel (sent in `X-API-Token` header). Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `STORYWATCHER_API_TOKEN` | — | API token protecting the web panel (sent in `X-API-Token` header) |
 | `TELEGRAM_API_ID` | — | Telegram API ID from my.telegram.org (**required**) |
 | `TELEGRAM_API_HASH` | — | Telegram API Hash from my.telegram.org (**required**) |
 | `WEB_PORT` | `8081` | External port for the web interface |
@@ -368,10 +367,6 @@ See `.env.example` for a ready-to-copy template with all variables and descripti
 | `TELEGRAM_PROXY_PORT` | — | Proxy port |
 | `TELEGRAM_PROXY_SECRET` | — | MTProto proxy secret |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:9000/api` | Frontend API base URL (set to `/api` in Docker via Nginx) |
-
-User settings (language, time zone, daily views limit, filters) are configured
-via the Settings page, stored in the database, and saved automatically on every
-change. All technical parameters are derived from the daily views limit.
 
 ## Pages
 
@@ -470,9 +465,9 @@ TG-Story-Watcher/
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/health` | Health check |
-| `POST` | `/api/register` | Register a new user |
-| `POST` | `/api/login` | Login (returns API token) |
-| `GET` | `/api/me` | Current user |
+| `POST` | `/api/user-auth/register` | Register a new user |
+| `POST` | `/api/user-auth/login` | Login (returns API token) |
+| `GET` | `/api/user-auth/me` | Current user |
 | `POST` | `/api/auth/send-code` | Send Telegram confirmation code |
 | `POST` | `/api/auth/confirm-code` | Confirm code (may return `twofa`) |
 | `POST` | `/api/auth/confirm-password` | Confirm 2FA password |
@@ -494,13 +489,6 @@ TG-Story-Watcher/
 | `POST` | `/api/queue/{id}/cancel` | Cancel queue item |
 | `POST` | `/api/queue/{id}/retry` | Retry queue item |
 | `DELETE` | `/api/queue/clear` | Clear queue |
-| `GET` | `/api/rules` | List automation rules |
-| `POST` | `/api/rules` | Create rule |
-| `PATCH` | `/api/rules/{id}` | Update rule |
-| `DELETE` | `/api/rules/{id}` | Delete rule |
-| `POST` | `/api/rules/{id}/enable` | Enable rule |
-| `POST` | `/api/rules/{id}/disable` | Disable rule |
-| `POST` | `/api/rules/{id}/test` | Test rule |
 | `GET` | `/api/whitelist` | List whitelist |
 | `POST` | `/api/whitelist` | Add to whitelist |
 | `DELETE` | `/api/whitelist/{id}` | Remove from whitelist |
@@ -513,7 +501,7 @@ TG-Story-Watcher/
 | `GET` | `/api/history/activity/count` | Activity count |
 | `GET` | `/api/dashboard` | Dashboard data (cards, charts, activity) |
 | `GET` | `/api/stats` | General statistics |
-| `GET` | `/api/analytics/overview` | Analytics overview (`?days=`) |
+| `GET` | `/api/analytics/overview` | Analytics overview (`?days=&period=`) |
 | `GET` | `/api/analytics/stories` | Stories with analytics |
 | `GET` | `/api/analytics/stories/{id}` | Story analytics details |
 | `GET` | `/api/analytics/stories/{id}/views` | Story views |

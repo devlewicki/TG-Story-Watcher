@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="CONTRIBUTING.md"><b>English</b></a> · <a href="README_ru.md">Русский</a>
+</p>
+
 # Contributing to TG Story Watcher
 
 Thanks for your interest in contributing! This document covers local
