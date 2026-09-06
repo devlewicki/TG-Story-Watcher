@@ -19,9 +19,10 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
 
   const add = async () => {
     try {
+      const normalizedUsername = username.trim().replace(/^@+/, "");
       await api.post(`/${kind}`, {
         account_id: Number(accountId) || 1,
-        username: username.trim() || null,
+        username: normalizedUsername || null,
         peer_id: peerId.trim() ? Number(peerId) : null,
         comment: comment.trim() || null,
       });
@@ -95,7 +96,7 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {items.map((e) => (
                   <tr key={e.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <td className="px-4 py-2 font-medium">{e.username ? `@${e.username}` : "—"}</td>
+                    <td className="px-4 py-2 font-medium">{e.username ? <a href={`https://t.me/${e.username}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline dark:text-emerald-400">@{e.username}</a> : "—"}</td>
                     <td className="px-4 py-2 text-slate-500">{e.peer_id ?? "—"}</td>
                     <td className="px-4 py-2 text-slate-500">{e.comment || "—"}</td>
                     <td className="px-4 py-2 text-slate-500">{timeAgo(e.created_at)}</td>

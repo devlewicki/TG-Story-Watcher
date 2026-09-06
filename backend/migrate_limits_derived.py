@@ -94,6 +94,9 @@ def migrate() -> None:
                     vdata = {}
                 view_changes = []
                 for k, v in derived["view"].items():
+                    # Delays are derived; preserve user-configured view options.
+                    if k in ("auto_like", "like_emoji", "max_stories_per_user_per_day"):
+                        continue
                     old = vdata.get(k)
                     if old != v:
                         vdata[k] = v

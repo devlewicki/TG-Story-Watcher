@@ -99,6 +99,38 @@ Before: 5000 limit, 3000 viewed
 After setting 12000: 9000 remaining
 ```
 
+## Performance
+
+The backend uses optimized SQL queries to minimize latency and database load:
+
+- **Dashboard charts** — single aggregated queries with `EXTRACT(HOUR)` and `DATE()` instead of 38 individual count queries
+- **Stories list** — DB-level LEFT JOIN with subqueries for sort order and view counts; offset/limit applied at the database level (no full-table Python load)
+- **Analytics overview** — `StoryViewer` counts via single `COUNT(*)` instead of per-story Python aggregation
+- **Settings service** — `compute_all_from_daily()` results are LRU-cached to avoid repeated recomputation per request cycle
+- **Connection pooling** — PostgreSQL pool tuned to `pool_size=10`, `max_overflow=20`, `pool_recycle=1800s` for concurrent API + worker load
+- **Discovery rotation** — separate offset dicts per search mode (hashtags, locations, geo-venues) prevent key collisions
+
+## Testing
+
+The project includes an integration test suite using pytest and SQLite in-memory databases:
+
+```bash
+cd backend
+pip install pytest httpx
+python -m pytest tests/ -v
+```
+
+**54 tests** covering:
+
+| Suite | What it verifies |
+|---|---|
+| Stories endpoint | DB-level pagination, sort order, view count aggregation, like annotations, filters, auth |
+| Dashboard endpoint | Aggregated hour/day charts, card counts, empty state, 401 |
+| Stats endpoint | Aggregated charts, totals, period parameter |
+| Analytics overview | Known viewers via DB aggregation, period filtering, top stories |
+| Settings service | `compute_all_from_daily` caching, defaults, limits recompute |
+| Scheduler rotation | Offset dict isolation (no key collisions between hashtags/locations/venues) |
+
 ## Screenshots
 
 | Dashboard | Accounts | Stories |
@@ -113,9 +145,9 @@ After setting 12000: 9000 remaining
 |---|---|---|
 | ![Settings](docs/screenshots/settings.png) | ![Whitelist](docs/screenshots/whitelist.png) | ![Blacklist](docs/screenshots/blacklist.png) |
 
-| History |
-|---|
-| ![History](docs/screenshots/history.png) |
+| History | Statistics |
+|---|---|
+| ![History](docs/screenshots/history.png) | ![Statistics](docs/screenshots/statistics.png) |
 
 ## Architecture
 
@@ -130,15 +162,32 @@ FastAPI backend ──────► PostgreSQL
    │                     Redis
    │
    ▼
-MTProto Telegram client
-   │
-   ▼
 Combined background worker
    │
-   ├── Queue processor (adaptive delays)
-   ├── Scheduler (story sync)
-   └── Discovery controller (adaptive search)
+   ├── Queue processor (adaptive delays, rate limiting)
+   ├── Scheduler (story sync, analytics collection)
+   └── Discovery controller (adaptive search, geo/hashtag rotation)
 ```
+
+### Backend Query Optimization
+
+| Endpoint | Before | After |
+|---|---|---|
+| `/dashboard` | 38 individual `COUNT(*)` queries (24h + 14d) | 2 aggregated queries with `EXTRACT(HOUR)` / `DATE()` |
+| `/stories` | Full table load into Python, sort + paginate in-memory | DB-level LEFT JOIN + `OFFSET/LIMIT` |
+| `/analytics/overview` | Per-story `_summary()` loop for viewers | Single `COUNT(*)` query |
+| `SettingsService.get()` | Repeated `compute_all_from_daily()` | LRU-cached (maxsize=64) |
+
+### Connection Pool (PostgreSQL)
+
+| Parameter | Value |
+|---|---|
+| `pool_size` | 10 |
+| `max_overflow` | 20 |
+| `pool_timeout` | 30s |
+| `pool_recycle` | 1800s |
+
+SQLite uses `SingletonThreadPool` (default) for local development.
 
 ## Requirements
 
@@ -403,6 +452,7 @@ TG-Story-Watcher/
 │   │   ├── db.py                  # SQLAlchemy engine and sessions
 │   │   ├── main.py                # FastAPI application
 │   │   └── models.py              # ORM models
+│   ├── tests/                     # Integration tests (pytest + SQLite)
 │   ├── migrate_limits_derived.py  # Migration: recalculate derived settings
 │   ├── Dockerfile
 │   ├── requirements.txt

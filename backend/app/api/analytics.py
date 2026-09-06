@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal,get_db
 from ..models import Story,StoryReactionStat,StoryStatsSnapshot,StoryViewer,TelegramAccount
 from .deps import require_api_token,current_user_id
+from .timezone import user_now, user_today, user_tz_name
 router=APIRouter(prefix="/analytics",tags=["analytics"],dependencies=[Depends(require_api_token)])
 Db=Annotated[Session,Depends(get_db)]
 def _story(db,story_id,user_id):
@@ -40,7 +41,7 @@ def events(db:Db,user_id:Annotated[int,Depends(current_user_id)],limit:int=Query
  q=db.query(StoryViewer,Story).join(Story,Story.id==StoryViewer.story_id).join(TelegramAccount,Story.account_id==TelegramAccount.id).filter(Story.source=="analytics",TelegramAccount.user_id==user_id,StoryViewer.viewed_at.isnot(None)).order_by(StoryViewer.viewed_at.desc()).limit(limit)
  return [{"type":"reaction" if v.reaction else "view","story_id":s.id,"telegram_story_id":s.telegram_story_id,"user_id":v.telegram_user_id,"username":v.username,"first_name":v.first_name,"last_name":v.last_name,"reaction":v.reaction,"occurred_at":v.viewed_at} for v,s in q.all()]
 @router.get("/overview")
-def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Query(30,ge=1,le=3650),period:str|None=Query(None),tz_offset:float=Query(0)):
+def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Query(30,ge=1,le=3650),period:str|None=Query(None)):
  """Return overview stats for the selected period.
 
  period: 'today', '7d', '30d', '90d', 'all'
@@ -50,10 +51,9 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
  - All time: cumulative values
  """
  from collections import defaultdict
- from zoneinfo import ZoneInfo
 
- user_tz = timezone(timedelta(hours=tz_offset))
- now_local = datetime.now(timezone.utc).astimezone(user_tz)
+ tz_name = user_tz_name(db, user_id)
+ now_local = user_now(db, user_id)
  today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
  # Determine period window
@@ -160,7 +160,7 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
        WHERE day >= :start_date;
      """)
      row = db.execute(query, {
-       "tz": f"+{int(tz_offset)}:00" if tz_offset >= 0 else f"{int(tz_offset)}:00",
+       "tz": tz_name,
        "start_utc": period_start_utc,
        "start_date": period_start_local.date(),
      }).fetchone()
@@ -183,7 +183,17 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
        .count()
      )
    else:
-     known_viewers = sum(_summary(db, db.get(Story, sid))["known_viewers"] for sid in story_ids)
+     # All time: use a single DB count instead of calling _summary per story
+     known_viewers = (
+       db.query(StoryViewer)
+       .join(Story)
+       .join(TelegramAccount)
+       .filter(
+         Story.source == "analytics",
+         TelegramAccount.user_id == user_id,
+       )
+       .count()
+     )
  else:
    known_viewers = 0
 
@@ -212,18 +222,17 @@ async def sync(account_id:int,db:Db,user_id:Annotated[int,Depends(current_user_i
 
 
 @router.get("/daily")
-def daily_analytics(db:Db,user_id:Annotated[int,Depends(current_user_id)],period:str=Query("7d"),tz_offset:float=Query(0)):
+def daily_analytics(db:Db,user_id:Annotated[int,Depends(current_user_id)],period:str=Query("7d")):
  """Return daily new views and reactions aggregated across all stories.
 
  Uses SQL-level aggregation for performance (no Python snapshot loading).
  period: 'today', '3d', '7d', 'month'
- tz_offset: hours offset from UTC for calendar day boundaries
  """
  from sqlalchemy import text
 
- # Determine time window in user's timezone
- user_tz = timezone(timedelta(hours=tz_offset))
- now_local = datetime.now(timezone.utc).astimezone(user_tz)
+ # Determine time window in user's timezone (from DB settings)
+ tz_name = user_tz_name(db, user_id)
+ now_local = user_now(db, user_id)
  today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
  if period == "today":
@@ -301,7 +310,7 @@ def daily_analytics(db:Db,user_id:Annotated[int,Depends(current_user_id)],period
  """)
 
  rows = db.execute(query, {
-   "tz": f"+{int(tz_offset)}:00" if tz_offset >= 0 else f"{int(tz_offset)}:00",
+   "tz": tz_name,
    "start_utc": start_utc,
    "start_date": start_local.date(),
  }).fetchall()

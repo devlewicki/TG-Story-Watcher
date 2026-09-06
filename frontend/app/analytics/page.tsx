@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Link from "next/link";
 
 import { api, type Account } from "@/lib/api";
@@ -25,16 +25,9 @@ export default function AnalyticsPage() {
     }
     return "all";
   });
-  const [tzOffset, setTzOffset] = useState(0);
-
-  useEffect(() => {
-    const offset = -new Date().getTimezoneOffset() / 60;
-    setTzOffset(offset);
-  }, []);
-
   const { data: overview, loading: overviewLoading, error: overviewError, refresh: refreshOverview } = useFetch<Overview>(
-    (signal) => api.get(`/analytics/overview?period=${period}&tz_offset=${tzOffset}`, signal),
-    [period, tzOffset]
+    (signal) => api.get(`/analytics/overview?period=${period}`, signal),
+    [period]
   );
   const recent = useFetch<RecentEvent[]>((signal) => api.get(`/analytics/recent-events?limit=30`, signal), []);
 
@@ -149,7 +142,7 @@ export default function AnalyticsPage() {
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate">
-                      <span className="font-medium">{event.username ? `@${event.username}` : [event.first_name, event.last_name].filter(Boolean).join(" ") || `User ${event.user_id}`}</span>
+                      <span className="font-medium">{event.username ? <a href={`https://t.me/${event.username}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline dark:text-emerald-400">@{event.username}</a> : [event.first_name, event.last_name].filter(Boolean).join(" ") || `User ${event.user_id}`}</span>
                       <span className="ml-2 text-slate-500"> {event.type === "reaction" ? t("analytics.reactedWith", { reaction: event.reaction || "" }) : t("analytics.viewedStory")}</span> <Link className="font-medium text-emerald-600 hover:underline" href={`/analytics/stories/${event.story_id}`}>#{event.telegram_story_id}</Link>
                     </div>
                     <div className="text-xs text-slate-400">{new Date(event.occurred_at).toLocaleString(locale)}</div>

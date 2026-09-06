@@ -31,59 +31,110 @@ def list_stories(
     limit: int = Query(100, le=500),
     offset: int = 0,
 ):
-    q = db.query(Story).join(TelegramAccount, Story.account_id == TelegramAccount.id).filter(TelegramAccount.user_id == user_id)
+    from sqlalchemy import func, case
+
+    # Subquery: last view time and view count per story.
+    views_sub = (
+        db.query(
+            StoryView.account_id,
+            StoryView.peer_id,
+            StoryView.telegram_story_id,
+            func.max(StoryView.viewed_at).label("last_viewed_at"),
+            func.count(StoryView.id).label("view_count"),
+        )
+        .group_by(StoryView.account_id, StoryView.peer_id, StoryView.telegram_story_id)
+        .subquery()
+    )
+
+    q = (
+        db.query(Story)
+        .join(TelegramAccount, Story.account_id == TelegramAccount.id)
+        .filter(TelegramAccount.user_id == user_id)
+    )
     if account_id is not None:
         q = q.filter(Story.account_id == account_id)
     if peer_id is not None:
         q = q.filter(Story.peer_id == peer_id)
     if source is not None:
         q = q.filter(Story.source == source)
-    # Fetch the whole (small) table: sorting by last-view time and pagination
-    # happen in Python below, so truncating here would silently drop the newest
-    # stories and make offset pagination run out early.
-    stories = q.all()
 
-    # Annotate which stories received an automatic like (from the activity log).
-    liked: dict[tuple[int, int], str] = {}
-    logs = (
-        db.query(ActivityLog)
-        .filter(ActivityLog.event_type == "story_liked")
-        .order_by(ActivityLog.created_at.desc())
-        .limit(5000)
+    # We need the total count for the frontend pagination display.
+    # But we must NOT load all stories — apply DB-level sort + pagination.
+    # Sort: viewed stories first (by last_viewed_at desc), then unviewed (by discovered_at desc).
+    # This requires a LEFT JOIN + COALESCE for the sort expression.
+    q_with_views = (
+        q.outerjoin(views_sub,
+            (Story.account_id == views_sub.c.account_id)
+            & (Story.peer_id == views_sub.c.peer_id)
+            & (Story.telegram_story_id == views_sub.c.telegram_story_id)
+        )
+    )
+
+    # Build sort expression: viewed stories first, then by most-recent time.
+    view_indicator = case(
+        (views_sub.c.last_viewed_at.isnot(None), 1),
+        else_=0,
+    )
+    sort_time = func.coalesce(
+        views_sub.c.last_viewed_at,
+        Story.discovered_at,
+        Story.published_at,
+        datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
+
+    stories = (
+        q_with_views
+        .order_by(view_indicator.desc(), sort_time.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
-    for a in logs:
-        try:
-            meta = json.loads(a.meta_json) if a.meta_json else {}
-        except (ValueError, TypeError):
-            continue
-        pid = meta.get("peer_id")
-        sid = meta.get("story_id")
-        if pid is not None and sid is not None:
-            liked.setdefault((int(pid), int(sid)), meta.get("emoji") or "👍")
 
-    # Last view time & view count per story (account_id, peer_id, telegram_story_id).
+    # Batch-load views for the returned stories only (small set).
     EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    story_keys = [(s.account_id, s.peer_id, s.telegram_story_id) for s in stories]
     views_map: dict[tuple[int, int, int], tuple[datetime, int]] = {}
-    for sv in db.query(StoryView).all():  # small table for MVP
-        k = (sv.account_id, sv.peer_id, sv.telegram_story_id)
-        last, cnt = views_map.get(k, (None, 0))
-        if last is None or sv.viewed_at > last:
-            last = sv.viewed_at
-        views_map[k] = (last, cnt + 1)
+    if story_keys:
+        from sqlalchemy import tuple_
+        for sv in (
+            db.query(StoryView)
+            .filter(tuple_(StoryView.account_id, StoryView.peer_id, StoryView.telegram_story_id).in_(story_keys))
+            .all()
+        ):
+            k = (sv.account_id, sv.peer_id, sv.telegram_story_id)
+            last, cnt = views_map.get(k, (None, 0))
+            if last is None or sv.viewed_at > last:
+                last = sv.viewed_at
+            views_map[k] = (last, cnt + 1)
 
-    def sort_key(s: Story):
-        v = views_map.get((s.account_id, s.peer_id, s.telegram_story_id))
-        if v is not None and v[0] is not None:
-            # Viewed stories first, newest view on top.
-            return (1, int(v[0].timestamp()))
-        # Unviewed stories below, ordered by discovery / publish time.
-        discovered = (s.discovered_at or EPOCH).timestamp()
-        published = (s.published_at or EPOCH).timestamp()
-        return (0, max(discovered, published))
-
-    stories.sort(key=sort_key, reverse=True)
-    stories = stories[offset : offset + limit]
+    # Batch-load likes for returned stories.
+    liked: dict[tuple[int, int], str] = {}
+    if story_keys:
+        peer_ids = list({k[1] for k in story_keys})
+        # Use a targeted query: find activity logs whose meta_json contains
+        # any of the peer_ids in our result set.  Since meta_json is a TEXT
+        # column, we do a LIKE search for each peer_id (fast with an index).
+        from sqlalchemy import or_
+        like_filters = []
+        for pid in peer_ids[:100]:  # cap to avoid overly large IN clause
+            like_filters.append(ActivityLog.meta_json.like(f'%"peer_id": {pid}%'))
+        if like_filters:
+            logs = (
+                db.query(ActivityLog)
+                .filter(ActivityLog.event_type == "story_liked", or_(*like_filters))
+                .order_by(ActivityLog.created_at.desc())
+                .limit(2000)
+                .all()
+            )
+            for a in logs:
+                try:
+                    meta = json.loads(a.meta_json) if a.meta_json else {}
+                except (ValueError, TypeError):
+                    continue
+                pid = meta.get("peer_id")
+                sid = meta.get("story_id")
+                if pid is not None and sid is not None:
+                    liked.setdefault((int(pid), int(sid)), meta.get("emoji") or "👍")
 
     out = []
     for s in stories:

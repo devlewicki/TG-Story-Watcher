@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
@@ -26,6 +27,7 @@ from ..models import (
 from ..queue.processor import process_queue_item
 from ..services import activity
 from ..services.settings_service import SettingsService
+from ..api.timezone import user_today
 from ..telegram import client_manager as cm
 
 logger = logging.getLogger("storywatcher.worker")
@@ -41,8 +43,8 @@ class RateLimiter:
     def __init__(self, db: Session):
         self.db = db
 
-    def count_today(self, account_id: int) -> int:
-        start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    def count_today(self, account_id: int, user_id: int | None) -> int:
+        start = user_today(self.db, user_id) if user_id is not None else _now().replace(hour=0, minute=0, second=0, microsecond=0)
         return (
             self.db.query(func.count(StoryView.id))
             .filter(StoryView.account_id == account_id, StoryView.viewed_at >= start)
@@ -146,18 +148,14 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
     limits = svc.get("limits")
     per_day = int(limits.get("views_per_day", 800))
     # Recompute hourly and minute limits from daily to ensure consistency
-    # Use floor division to avoid exceeding the daily limit
     per_hour = per_day // 24
-    per_min = per_day // 1440
-    # Ensure at least 1 for per_min if daily > 0
-    if per_day > 0 and per_min == 0:
-        per_min = 1
+    per_min = max(1, math.ceil(per_day / 1440)) if per_day > 0 else 1
     parallel = max(int(svc.get("queue").get("parallel", 1)), 1)
 
     limiter = RateLimiter(db)
 
     # Enforce per-day budget first.
-    today_count = limiter.count_today(account.id)
+    today_count = limiter.count_today(account.id, account.user_id)
     logger.debug("drain_queue(%s) today=%d per_day=%d", account.id, today_count, per_day)
     if today_count >= per_day:
         logger.info("account %s at daily view limit (%d/%d)", account.id, today_count, per_day)
@@ -181,6 +179,7 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
         return 0
 
     semaphore = asyncio.Semaphore(parallel)
+    author_locks: dict[int, asyncio.Lock] = {}
     results = []
 
     async def _handle(item: StoryQueue):
@@ -193,7 +192,12 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
                 db.commit()
                 return {"item": item.id, "status": "LIMIT"}
 
-            res = await process_queue_item(client, account, item, db)
+            # Serialize items for the same author so the per-author daily
+            # limit is re-evaluated after each completed view.
+            peer_id = item.story.peer_id if item.story is not None else item.id
+            author_lock = author_locks.setdefault(peer_id, asyncio.Lock())
+            async with author_lock:
+                res = await process_queue_item(client, account, item, db)
             results.append(res)
             await asyncio.sleep(0.3)  # small delay between views
 

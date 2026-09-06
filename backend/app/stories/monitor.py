@@ -15,6 +15,7 @@ from ..models import (
     GeoPlace,
     Story,
     StoryQueue,
+    StoryView,
     TelegramAccount,
     WhitelistEntry,
 )
@@ -194,7 +195,8 @@ class StoryMonitor:
             # Re-evaluate: allow queueing if it passed and not yet processed.
             if not result.passed:
                 return existing, "skipped", result.reason
-            self._enqueue(existing, result.rule_match)
+            if not self._enqueue(existing, result.rule_match):
+                return existing, "skipped", "daily limit reached"
             return existing, "enqueued", None
 
         if not result.passed:
@@ -218,7 +220,8 @@ class StoryMonitor:
         story = self._store_story(peer_id, story_id, info, source)
         if story is None:
             return None, "expired", "story expired"
-        self._enqueue(story, result.rule_match, source=source, rule_name=rule_name)
+        if not self._enqueue(story, result.rule_match, source=source, rule_name=rule_name):
+            return story, "skipped", "daily limit reached"
         return story, "enqueued", None
 
     def _store_story(self, peer_id: int, story_id: int, info: dict, source: str) -> Story | None:
@@ -243,17 +246,61 @@ class StoryMonitor:
         self.db.flush()
         return story
 
-    def _enqueue(self, story: Story, rule_match: str | None, source: str = "monitor", rule_name: str | None = None) -> None:
+    def _enqueue(self, story: Story, rule_match: str | None, source: str = "monitor", rule_name: str | None = None) -> bool:
         existing = (
             self.db.query(StoryQueue)
             .filter_by(account_id=self.account.id, story_id=story.id)
             .first()
         )
         if existing is not None:
-            return
+            return False
         s = SettingsService(self.db, self.account.user_id)
-        min_delay = s.get("view").get("min_delay", 20)
-        max_delay = s.get("view").get("max_delay", 120)
+        view_cfg = s.get("view")
+        min_delay = view_cfg.get("min_delay", 20)
+        max_delay = view_cfg.get("max_delay", 120)
+
+        # Check per-user daily story limit for this Telegram account.
+        max_per_user = int(view_cfg.get("max_stories_per_user_per_day", 3))
+        if max_per_user > 0:
+            from zoneinfo import ZoneInfo
+            tz_name = s.get("general").get("timezone", "UTC")
+            try:
+                user_tz = ZoneInfo(tz_name)
+            except Exception:
+                user_tz = ZoneInfo("UTC")
+            local_now = datetime.now(timezone.utc).astimezone(user_tz)
+            day_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_start_utc = day_start_local.astimezone(timezone.utc)
+            viewed_today = (
+                self.db.query(StoryView)
+                .join(TelegramAccount, StoryView.account_id == TelegramAccount.id)
+                .filter(
+                    TelegramAccount.user_id == self.account.user_id,
+                    StoryView.peer_id == story.peer_id,
+                    StoryView.viewed_at >= day_start_utc,
+                )
+                .count()
+            )
+            queued_for_peer = (
+                self.db.query(StoryQueue)
+                .join(Story, Story.id == StoryQueue.story_id)
+                .join(TelegramAccount, StoryQueue.account_id == TelegramAccount.id)
+                .filter(
+                    TelegramAccount.user_id == self.account.user_id,
+                    Story.peer_id == story.peer_id,
+                    StoryQueue.status.in_(["PENDING", "WAITING_DELAY", "PROCESSING"]),
+                )
+                .count()
+            )
+            if viewed_today + queued_for_peer >= max_per_user:
+                activity.log(
+                    f"Story skipped: peer={story.peer_id} — daily limit reached ({viewed_today}/{max_per_user})",
+                    event_type="story_skipped",
+                    account_id=self.account.id,
+                    metadata={"peer_id": story.peer_id, "story_id": story.telegram_story_id, "reason": "daily limit"},
+                    db=self.db,
+                )
+                return False
         import random
 
         delay = random.randint(int(min_delay), max(int(max_delay), int(min_delay)))
@@ -283,6 +330,7 @@ class StoryMonitor:
             db=self.db,
         )
         self.db.commit()
+        return True
 
     # ---- fetching available stories (burst fetch) ----
     async def fetch_available(self, resync: bool = True) -> int:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 from telethon import errors
@@ -66,6 +67,58 @@ async def process_queue_item(
         queue_item.completed_at = _now()
         db.commit()
         return {"status": "VIEWED", "error": "already viewed"}
+
+    # Re-check the per-author daily limit immediately before the Telegram call.
+    # Queue-time checks cannot cover items queued before a setting change or
+    # multiple workers racing to process the same author.
+    try:
+        view_cfg = SettingsService(db, account.user_id).get("view")
+        max_per_user = int(view_cfg.get("max_stories_per_user_per_day", 3))
+        if max_per_user > 0:
+            tz_name = SettingsService(db, account.user_id).get("general").get("timezone", "UTC")
+            try:
+                user_tz = ZoneInfo(tz_name)
+            except Exception:
+                user_tz = ZoneInfo("UTC")
+            local_now = _now().astimezone(user_tz)
+            day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+            viewed_today = (
+                db.query(StoryView)
+                .join(TelegramAccount, StoryView.account_id == TelegramAccount.id)
+                .filter(
+                    TelegramAccount.user_id == account.user_id,
+                    StoryView.peer_id == story.peer_id,
+                    StoryView.viewed_at >= day_start,
+                )
+                .count()
+            )
+            active_for_peer = (
+                db.query(StoryQueue)
+                .join(Story, Story.id == StoryQueue.story_id)
+                .join(TelegramAccount, StoryQueue.account_id == TelegramAccount.id)
+                .filter(
+                    TelegramAccount.user_id == account.user_id,
+                    Story.peer_id == story.peer_id,
+                    StoryQueue.status.in_(["PENDING", "WAITING_DELAY", "PROCESSING"]),
+                    StoryQueue.id != queue_item.id,
+                )
+                .count()
+            )
+            if viewed_today + active_for_peer >= max_per_user:
+                queue_item.status = "SKIPPED"
+                queue_item.error = f"daily author limit reached ({viewed_today}/{max_per_user})"
+                queue_item.completed_at = _now()
+                activity.log(
+                    f"Story skipped: peer={story.peer_id} — {queue_item.error}",
+                    event_type="story_skipped",
+                    account_id=account.id,
+                    metadata={"peer_id": story.peer_id, "story_id": story.telegram_story_id, "reason": "daily limit"},
+                    db=db,
+                )
+                db.commit()
+                return {"status": "SKIPPED", "error": queue_item.error}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("per-author daily limit check failed: %s", exc)
 
     queue_item.status = "PROCESSING"
     queue_item.started_at = _now()

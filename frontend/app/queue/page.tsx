@@ -20,7 +20,7 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
         <div className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">
           {name}
           {username && (
-            <span className="ml-1.5 font-normal text-slate-400">@{username}</span>
+            <a href={`https://t.me/${username}`} target="_blank" rel="noopener noreferrer" className="ml-1.5 font-normal text-emerald-600 hover:underline dark:text-emerald-400">@{username}</a>
           )}
         </div>
         <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-400">

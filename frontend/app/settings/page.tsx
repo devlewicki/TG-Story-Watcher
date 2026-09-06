@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 import { Card, CardHeader, ErrorBanner, Spinner, Switch } from "@/components/ui";
+import { computeAllFromDaily } from "@/lib/compute_all_from_daily";
 
 type SettingsMap = Record<string, Record<string, unknown>>;
 
@@ -152,6 +153,13 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.view.description"),
       icon: "❤️",
       fields: {
+        max_stories_per_user_per_day: {
+          label: t("settings.sections.view.fields.maxStoriesPerUserPerDay.label"),
+          description: t("settings.sections.view.fields.maxStoriesPerUserPerDay.description"),
+          type: "number",
+          min: 1,
+          slider: { min: 1, max: 10 },
+        },
         auto_like: {
           label: t("settings.sections.view.fields.autoLike.label"),
           description: t("settings.sections.view.fields.autoLike.description"),
@@ -223,35 +231,11 @@ export default function SettingsPage() {
     if (section === "limits" && key === "views_per_day") {
       const daily = Math.max(50, Math.min(12000, Number(value) || 0));
       if (daily > 0) {
-        const viewsPerHour = Math.floor(daily / 24);
-        const viewsPerMinute = Math.ceil(daily / 1440);
-        const avgDelay = 86400 / daily;
-        const minDelay = Math.max(3, Math.min(20, Math.round(avgDelay * 0.3)));
-        const maxDelay = Math.max(10, Math.min(120, Math.round(avgDelay * 1.5)));
-        const parallel = daily >= 8000 ? 3 : daily >= 3000 ? 2 : 1;
-        const checkInterval = Math.max(15, Math.min(60, 120 - Math.floor(daily / 100)));
-        const searchesPerHour = Math.max(1, Math.min(10, Math.floor(daily / 1500)));
-        const searchDelay = Math.max(60, Math.min(600, 900 - Math.floor(daily / 20)));
-
-        next.limits = {
-          ...next.limits,
-          views_per_day: daily,
-          views_per_hour: viewsPerHour,
-          views_per_minute: viewsPerMinute,
-          searches_per_hour: searchesPerHour,
-          search_results_max: 50,
-          search_delay: searchDelay,
-        };
-        next.view = { ...next.view, min_delay: minDelay, max_delay: maxDelay };
-        next.queue = {
-          ...next.queue,
-          max_tasks: 50,
-          parallel,
-          backoff_factor: 2.0,
-          processing_timeout: 300,
-          max_auto_retries: 3,
-        };
-        next.monitoring = { ...next.monitoring, check_interval: checkInterval };
+        const derived = computeAllFromDaily(daily);
+        next.limits = { ...next.limits, ...derived.limits };
+        next.view = { ...next.view, ...derived.view };
+        next.queue = { ...next.queue, ...derived.queue };
+        next.monitoring = { ...next.monitoring, ...derived.monitoring };
       }
     }
 

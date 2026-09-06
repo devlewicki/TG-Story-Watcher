@@ -18,6 +18,7 @@ CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
 from ..db import SessionLocal
 from ..models import AccountStatus, TelegramAccount
 from ..services.settings_service import SettingsService
+from ..api.timezone import user_today
 from ..stories import discovery
 from ..stories.monitor import StoryMonitor, load_contacts_into
 from ..telegram import client_manager as cm
@@ -162,6 +163,9 @@ _auto_venue_offset: dict[int, int] = {}
 # Round-robin pointer for hashtags: search a subset each cycle.
 _hashtag_offset: dict[int, int] = {}
 
+# Round-robin pointer for manual locations: search a subset each cycle.
+_location_offset: dict[int, int] = {}
+
 # Round-robin pointer for geo-search venues: search a subset each cycle.
 _geo_venue_offset: dict[int, int] = {}
 
@@ -196,7 +200,7 @@ def _compute_adaptive_search_params(db, user_id: int) -> dict:
     )
 
     # Views completed today
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = user_today(db, user_id)
     views_today = (
         db.query(func.count(StoryView.id))
         .filter(StoryView.account_id.in_(acc_ids), StoryView.viewed_at >= today_start)
@@ -392,9 +396,9 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
                 _auto_venue_offset[uid] = (start + auto_budget) % len(auto)
         # Rotate through manually-configured locations.
         if all_locations:
-            l_offset = _hashtag_offset.get(uid * 1000 + 1, 0) % len(all_locations)
+            l_offset = _location_offset.get(uid, 0) % len(all_locations)
             manual_locations = (all_locations[l_offset:] + all_locations[:l_offset])[:location_budget]
-            _hashtag_offset[uid * 1000 + 1] = (l_offset + location_budget) % len(all_locations)
+            _location_offset[uid] = (l_offset + location_budget) % len(all_locations)
         else:
             manual_locations = []
 

@@ -94,6 +94,13 @@ TG-Story-Watcher/
 │   │   ├── main.py         # FastAPI app entry point
 │   │   ├── models.py       # ORM models
 │   │   └── multitenancy.py # User auth, token, password hashing
+│   ├── tests/              # Integration tests (pytest + SQLite)
+│   │   ├── conftest.py     # Fixtures, test DB setup, data seeding
+│   │   ├── test_stories.py # Stories endpoint tests
+│   │   ├── test_dashboard.py # Dashboard + stats endpoint tests
+│   │   ├── test_analytics.py # Analytics endpoint tests
+│   │   ├── test_settings_service.py # Settings service tests
+│   │   └── test_scheduler_rotation.py # Discovery rotation tests
 │   ├── migrate_limits_derived.py  # Migration: recalculate derived settings
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -190,13 +197,26 @@ The system derives all technical parameters from a single user input:
 
 ## Testing
 
-### Backend
+### Backend (Integration Tests)
 
 ```bash
 cd backend
 pip install -r requirements.txt
-python -m pytest tests/ -q
+pip install pytest httpx
+python -m pytest tests/ -v
 ```
+
+The test suite uses in-memory SQLite databases (shared-cache mode) to avoid
+requiring a running PostgreSQL instance. Tests cover:
+
+- **Stories endpoint** — DB-level pagination, sort order, view count aggregation, like annotations, filters, authentication
+- **Dashboard endpoint** — aggregated hour/day charts, card counts, empty states, 401
+- **Stats endpoint** — aggregated charts, totals, period parameter
+- **Analytics overview** — known viewers via DB aggregation, period filtering, top stories
+- **Settings service** — `compute_all_from_daily` caching, defaults, limits recompute
+- **Scheduler rotation** — offset dict isolation (no key collisions between hashtags/locations/venues)
+
+**54 tests** total. Run with `python -m pytest tests/ -v` for detailed output.
 
 ### Manual Testing
 

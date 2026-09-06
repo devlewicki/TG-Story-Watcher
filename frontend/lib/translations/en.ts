@@ -377,6 +377,10 @@ const en = {
         fields: {
           minDelay: { label: "Minimum delay", unit: "sec" },
           maxDelay: { label: "Maximum delay", unit: "sec" },
+          maxStoriesPerUserPerDay: {
+            label: "Max stories per user per day",
+            description: "Limits how many stories can be viewed from one user per day. Newest first. Resets at midnight in your timezone.",
+          },
           autoLike: {
             label: "Auto-like",
             description: "React to every viewed story",

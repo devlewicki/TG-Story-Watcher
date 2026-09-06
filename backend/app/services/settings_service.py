@@ -1,10 +1,12 @@
 from __future__ import annotations
 import json
 import math
+from functools import lru_cache
 from sqlalchemy.orm import Session
 from ..models import SettingsStore
 
 
+@lru_cache(maxsize=64)
 def compute_all_from_daily(daily: int) -> dict:
     """Compute all system parameters from a single daily views limit.
 
@@ -17,7 +19,7 @@ def compute_all_from_daily(daily: int) -> dict:
     views_per_hour = daily // 24
     views_per_minute = math.ceil(daily / 1440)
     searches_per_hour = max(1, min(10, daily // 1500))
-    search_results_max = 50
+    search_results_max = 20 if daily <= 200 else 50 if daily <= 2000 else 100 if daily <= 5000 else 200
     search_delay = max(60, min(600, 900 - (daily // 20)))
 
     # ── View delays ─────────────────────────────────────────────────
@@ -33,10 +35,10 @@ def compute_all_from_daily(daily: int) -> dict:
         parallel = 2
     else:
         parallel = 1
-    max_tasks = 50
-    backoff_factor = 2.0
-    processing_timeout = 300
-    max_auto_retries = 3
+    max_tasks = 50 if daily <= 2000 else 100 if daily <= 5000 else 200
+    backoff_factor = 1.5 if daily >= 8000 else 2.0
+    processing_timeout = 300 if daily <= 2000 else 600
+    max_auto_retries = 3 if daily <= 5000 else 5
 
     # ── Monitoring ──────────────────────────────────────────────────
     check_interval = max(15, min(60, 120 - (daily // 100)))
@@ -74,7 +76,7 @@ class SettingsService:
         "monitoring": {"check_interval": 30, "realtime": True, "resync": True},
         "queue": {"max_tasks": 50, "parallel": 1, "backoff_factor": 2.0, "processing_timeout": 300, "max_auto_retries": 3},
         "limits": {"views_per_minute": 0, "views_per_hour": 0, "views_per_day": 800, "searches_per_hour": 5, "search_results_max": 50, "search_delay": 300},
-        "view": {"min_delay": 20, "max_delay": 120, "auto_like": False, "like_emoji": "👍"},
+        "view": {"min_delay": 20, "max_delay": 120, "auto_like": False, "like_emoji": "👍", "max_stories_per_user_per_day": 3},
         "discovery": {"hashtags": [], "locations": [], "enabled": False, "hashtags_enabled": True},
         "filters": {"include_contacts": False, "include_unknown": True, "include_mutual_contacts": False, "include_non_mutual": True, "include_channels": True, "include_groups": True, "include_bots": True, "include_deleted": False, "include_blocked": False},
     }
@@ -125,6 +127,9 @@ class SettingsService:
             derived = compute_all_from_daily(daily)
             if s in derived:
                 for k, v in derived[s].items():
+                    # Only overwrite auto-computed values, preserve user settings
+                    if s == "view" and k in ("auto_like", "like_emoji", "max_stories_per_user_per_day"):
+                        continue
                     data[k] = v
         return data
 

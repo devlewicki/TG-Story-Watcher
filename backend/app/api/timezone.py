@@ -38,3 +38,17 @@ def user_start_day(db: Session, user_id: int, days_ago: int = 0) -> datetime:
     """UTC-aware datetime for midnight N days ago in the user's timezone."""
     today = user_today(db, user_id)
     return today - timedelta(days=days_ago)
+
+
+def user_tz_name(db: Session, user_id: int) -> str:
+    """Return the user's configured timezone name (IANA), fallback to 'UTC'.
+
+    Used to pass to PostgreSQL ``AT TIME ZONE`` which natively supports
+    IANA names (e.g. ``'Europe/Moscow'``), handling DST and fractional
+    offsets automatically.
+    """
+    try:
+        svc = SettingsService(db, user_id)
+        return svc.get("general").get("timezone", DEFAULT_TZ) or DEFAULT_TZ
+    except Exception:
+        return DEFAULT_TZ

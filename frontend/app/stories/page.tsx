@@ -85,9 +85,9 @@ export default function StoriesPage() {
                     <div className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">
                       {s.author_name || "—"}
                       {s.author_username && (
-                        <span className="ml-1.5 font-normal text-slate-400">
+                        <a href={`https://t.me/${s.author_username}`} target="_blank" rel="noopener noreferrer" className="ml-1.5 font-normal text-emerald-600 hover:underline dark:text-emerald-400">
                           @{s.author_username}
-                        </span>
+                        </a>
                       )}
                     </div>
                     <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-400">

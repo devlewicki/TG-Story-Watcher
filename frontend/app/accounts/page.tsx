@@ -98,7 +98,7 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
           <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             {account.phone}
             {fullName ? ` · ${fullName}` : ""}
-            {account.username ? ` · @${account.username}` : ""}
+            {account.username ? <> · <a href={`https://t.me/${account.username}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline dark:text-emerald-400">@{account.username}</a></> : ""}
             {account.telegram_user_id ? ` · id ${account.telegram_user_id}` : ""}
           </div>
         </div>

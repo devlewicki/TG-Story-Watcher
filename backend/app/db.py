@@ -11,7 +11,20 @@ settings = get_settings()
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 
-engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
+# Connection pool tuning: default pool_size=5 with max_overflow=10 may be
+# insufficient when API requests + worker processes compete for connections.
+is_postgres = settings.database_url.startswith("postgresql")
+_pool_kwargs: dict = {
+    "pool_pre_ping": True,
+}
+if is_postgres:
+    _pool_kwargs.update({
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_timeout": 30,
+        "pool_recycle": 1800,
+    })
+engine = create_engine(settings.database_url, connect_args=connect_args, **_pool_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
