@@ -106,3 +106,11 @@ body * {
   transition-property: background-color, border-color, color;
   transition-duration: 150ms;
 }
+
+/* ---- Shared form field ----
+   Visual style only (no width) so it composes with w-full / flex-1 / w-40 etc. */
+@layer components {
+  .sw-input {
+    @apply rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100;
+  }
+}

@@ -23,6 +23,18 @@ class SettingsUpdate(_BM):
     value: dict
 
 
+class PutSettingsIn(_BM):
+    """Validate all sections at the boundary so bad data never reaches the DB."""
+    general: dict | None = None
+    telegram: dict | None = None
+    monitoring: dict | None = None
+    queue: dict | None = None
+    limits: dict | None = None
+    view: dict | None = None
+    discovery: dict | None = None
+    filters: dict | None = None
+
+
 @router.get("")
 def get_settings(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     svc = SettingsService(db, user_id)
@@ -33,13 +45,15 @@ def get_settings(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
 def update_settings(payload: SettingsUpdate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     svc = SettingsService(db, user_id)
     if payload.section not in svc.DEFAULTS:
-        return {"ok": False, "error": f"unknown section: {payload.section}"}
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail=f"unknown section: {payload.section}")
     merged = svc.set(payload.section, payload.value)
     return {"ok": True, "section": payload.section, "value": merged}
 
 
 @router.put("")
-def put_settings(values: dict, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+def put_settings(payload: PutSettingsIn, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     svc = SettingsService(db, user_id)
+    values = {k: v for k, v in payload.model_dump(exclude_none=True).items()}
     result = svc.set_all(values)
     return {"ok": True, "settings": result}

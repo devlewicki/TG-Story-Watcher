@@ -108,7 +108,7 @@ def _session_path_for_deleted(account_id: int) -> str:
 
 
 @router.post("/send-code")
-async def send_code(payload: SendCodeIn):
+async def send_code(payload: SendCodeIn, user_id: Annotated[int, Depends(current_user_id)]):
     try:
         await cm.auth_send_code(payload.phone)
     except Exception as exc:
@@ -141,6 +141,6 @@ async def confirm_password(payload: ConfirmPasswordIn, db: Db, user_id: Annotate
 
 
 @router.get("/status")
-async def auth_status(db: Db):
-    accounts = db.query(TelegramAccount).all()
+async def auth_status(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    accounts = db.query(TelegramAccount).filter(TelegramAccount.user_id == user_id).all()
     return {"accounts": [account_out(a) for a in accounts]}

@@ -10,6 +10,7 @@ from .api import auth, user_auth, settings, dashboard, discovery, accounts, rule
 from .api import stories, queue, history, analytics
 from .config import get_settings
 from .db import init_db
+from .telegram import client_manager as cm
 
 
 logger = logging.getLogger("storywatcher")
@@ -23,7 +24,11 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("%s starting (db=%s)", settings_cfg.app_name, settings_cfg.database_url)
     yield
-    logger.info("%s shutting down", settings_cfg.app_name)
+    logger.info("%s shutting down, disconnecting Telegram clients", settings_cfg.app_name)
+    try:
+        await cm.shutdown_all()
+    except Exception:
+        logger.exception("error disconnecting Telegram clients during shutdown")
 
 
 app = FastAPI(

@@ -48,21 +48,22 @@ def _defaults(cfg: dict | None) -> dict:
         "search_results_max": 50,
     }
     if cfg:
+        src = dict(cfg)  # copy: never mutate the caller's dict below
         # Handle legacy nested geo_search object → flatten into top-level keys
-        if "geo_search" in cfg and isinstance(cfg["geo_search"], dict):
-            gs = cfg["geo_search"]
+        if "geo_search" in src and isinstance(src["geo_search"], dict):
+            gs = src["geo_search"]
             # Only migrate from legacy dict if flat keys are genuinely missing
             # (not present or empty string / None).  This prevents a stale
             # empty legacy dict from clobbering valid flat keys.
-            if not cfg.get("geo_search_enabled") and gs.get("enabled"):
-                cfg["geo_search_enabled"] = True
-            if not cfg.get("geo_search_lat") and gs.get("lat") is not None:
-                cfg["geo_search_lat"] = gs["lat"]
-            if not cfg.get("geo_search_lng") and gs.get("lng") is not None:
-                cfg["geo_search_lng"] = gs["lng"]
-            if not cfg.get("geo_search_radius_km") and gs.get("radius_km") is not None:
-                cfg["geo_search_radius_km"] = gs["radius_km"]
-        out.update(cfg)
+            if not src.get("geo_search_enabled") and gs.get("enabled"):
+                src["geo_search_enabled"] = True
+            if src.get("geo_search_lat") is None and gs.get("lat") is not None:
+                src["geo_search_lat"] = gs["lat"]
+            if src.get("geo_search_lng") is None and gs.get("lng") is not None:
+                src["geo_search_lng"] = gs["lng"]
+            if not src.get("geo_search_radius_km") and gs.get("radius_km") is not None:
+                src["geo_search_radius_km"] = gs["radius_km"]
+        out.update(src)
     # Treat empty-string values as missing (DB stores JSON null as "")
     for k in ("hashtags_enabled", "geo_search_enabled", "geo_search_lat",
               "geo_search_lng", "geo_search_radius_km"):
@@ -134,7 +135,7 @@ def list_places(
 # ---------- Geocode ----------
 
 @router.get("/geocode")
-def geocode(
+async def geocode(
     db: Db,
     q: str = "",
     user_id: Annotated[int, Depends(current_user_id)] = None,
@@ -147,9 +148,11 @@ def geocode(
         + urllib.parse.urlencode({"q": q.strip(), "format": "jsonv2", "limit": 5})
     )
     try:
+        # Offload the blocking HTTP call to a thread so it never stalls the
+        # async event loop (geocode proxy otherwise blocks all requests).
         req = urllib.request.Request(url, headers={"User-Agent": "StoryWatcher/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as response:
-            data = json.loads(response.read().decode())
+        import asyncio
+        data = await asyncio.to_thread(_geocode_fetch, req)
     except Exception:
         return []
     return [
@@ -163,6 +166,11 @@ def geocode(
         }
         for x in data
     ]
+
+
+def _geocode_fetch(req: urllib.request.Request) -> list:
+    with urllib.request.urlopen(req, timeout=8) as response:
+        return json.loads(response.read().decode())
 
 
 # ---------- Manual search trigger ----------

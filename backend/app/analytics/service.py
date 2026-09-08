@@ -55,6 +55,7 @@ async def collect_account(account_id: int, db: Session, client) -> int:
     stories_field = getattr(result, "stories", []) if result else []
     stories = list(stories_field) if isinstance(stories_field, (list, tuple)) else list(getattr(stories_field, "stories", []) or [])
     offset_id = 0
+    archived_min = None
     while True:
         page = await _call(client, functions.stories.GetStoriesArchiveRequest(peer=types.InputPeerSelf(), offset_id=offset_id, limit=100), account_id)
         page_field = getattr(page, "stories", []) if page else []
@@ -62,10 +63,17 @@ async def collect_account(account_id: int, db: Session, client) -> int:
         stories.extend(page_stories)
         if len(page_stories) < 100:
             break
-        next_offset = min((getattr(s, "id", offset_id) for s in page_stories), default=offset_id)
-        if next_offset == offset_id:
+        # GetStoriesArchive(offset_id=X) returns stories *older* than X, so the
+        # next offset must be min(id) - 1.  Using min(id) alone re-fetches the
+        # same page forever (infinite loop).
+        min_id = min((getattr(s, "id", offset_id) for s in page_stories), default=None)
+        if min_id is None:
             break
-        offset_id = next_offset
+        if archived_min is not None and min_id >= archived_min:
+            # No forward progress — avoid an infinite loop on the same page.
+            break
+        archived_min = min_id
+        offset_id = min_id - 1
 
     seen: set[int] = set()
     for item in stories:
@@ -109,7 +117,9 @@ async def collect_story(story: Story, db: Session, client) -> None:
         row.count = int(getattr(reaction, "count", 0) or 0)
 
     offset = ""
-    for _ in range(10):
+    pages = 0
+    max_pages = 10
+    for _ in range(max_pages):
         viewer_result = await _call(client, functions.stories.GetStoryViewsListRequest(peer=types.InputPeerSelf(), id=story.telegram_story_id, limit=100, offset=offset, just_contacts=False), story.account_id, story.telegram_story_id)
         if not viewer_result:
             break
@@ -134,4 +144,10 @@ async def collect_story(story: Story, db: Session, client) -> None:
         if not next_offset or next_offset == offset:
             break
         offset = next_offset
+        pages += 1
+    else:
+        logger.warning(
+            "viewer pagination hit the %d-page cap for story %s (story_id=%s)",
+            max_pages, story.telegram_story_id, story.id,
+        )
     db.commit()

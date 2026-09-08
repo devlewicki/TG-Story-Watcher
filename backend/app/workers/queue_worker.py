@@ -101,17 +101,51 @@ def _recover_stale_processing(
     return len(stale)
 
 
-def _due_items(db: Session, account_id: int, max_items: int) -> Sequence[StoryQueue]:
-    return (
-        db.query(StoryQueue)
-        .options(joinedload(StoryQueue.story))
+def _claim_due_items(db: Session, account_id: int, max_items: int) -> Sequence[StoryQueue]:
+    """Atomically claim due queue items for this worker process.
+
+    One conditional UPDATE flips eligible rows from PENDING/WAITING_DELAY to
+    PROCESSING; only the rows the UPDATE actually matched are returned.  This
+    guarantees two worker processes can never pick up the same item, which
+    also closes the race where both would pass the per-author limit check and
+    view/like the same story twice.
+    """
+    from sqlalchemy import update
+
+    now = _now()
+    candidates = (
+        db.query(StoryQueue.id)
         .filter(
             StoryQueue.account_id == account_id,
             StoryQueue.status.in_(["PENDING", "WAITING_DELAY"]),
-            StoryQueue.scheduled_at <= _now(),
+            StoryQueue.scheduled_at <= now,
         )
         .order_by(StoryQueue.priority.desc(), StoryQueue.scheduled_at.asc())
         .limit(max_items)
+        .all()
+    )
+    ids = [c[0] for c in candidates]
+    if not ids:
+        return []
+    claimed = (
+        db.execute(
+            update(StoryQueue)
+            .where(
+                StoryQueue.id.in_(ids),
+                StoryQueue.status.in_(["PENDING", "WAITING_DELAY"]),
+            )
+            .values(status="PROCESSING", started_at=now)
+        ).rowcount
+        or 0
+    )
+    db.commit()
+    if not claimed:
+        return []
+    return (
+        db.query(StoryQueue)
+        .options(joinedload(StoryQueue.story))
+        .filter(StoryQueue.id.in_(ids), StoryQueue.status == "PROCESSING")
+        .order_by(StoryQueue.priority.desc(), StoryQueue.scheduled_at.asc())
         .all()
     )
 
@@ -133,16 +167,16 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
             client = await asyncio.wait_for(cm.reconnect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
         except Exception as reconnect_exc:
             logger.error("drain_queue(%s) reconnect also failed: %s", account.id, reconnect_exc)
-            return
+            return 0
     if not client.is_connected():
-        return
+        return 0
 
     if not await asyncio.wait_for(client.is_user_authorized(), timeout=ACCOUNT_CONNECT_TIMEOUT):
         account.status = AccountStatus.DISCONNECTED.value
         account.monitoring = False
         # Do NOT clear session_path — preserve auth data for re-auth.
         db.commit()
-        return
+        return 0
 
     svc = SettingsService(db, account.user_id)
     limits = svc.get("limits")
@@ -150,7 +184,16 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
     # Recompute hourly and minute limits from daily to ensure consistency
     per_hour = per_day // 24
     per_min = max(1, math.ceil(per_day / 1440)) if per_day > 0 else 1
-    parallel = max(int(svc.get("queue").get("parallel", 1)), 1)
+
+    qcfg = svc.get("queue")
+    # Hard caps: claiming 100+ items and opening a DB session for each kept the
+    # connection pool exhausted and the event loop blocked in synchronous borrows
+    # (K-01 wedge). Parallelism stays modest; sessions are only opened inside the
+    # semaphore below.
+    parallel = min(max(int(qcfg.get("parallel", 1)), 1), 4)
+    max_tasks = min(max(int(qcfg.get("max_tasks", 25)), 1), 100)
+    task_timeout = max(10, int(qcfg.get("task_timeout", 60)))
+    max_auto_retries = int(qcfg.get("max_auto_retries", 3))
 
     limiter = RateLimiter(db)
 
@@ -161,19 +204,9 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
         logger.info("account %s at daily view limit (%d/%d)", account.id, today_count, per_day)
         account.status = AccountStatus.PAUSED.value
         db.commit()
-        return
+        return 0
 
-    # Recover items stuck in PROCESSING from a crashed/killed worker run so
-    # they don't block the queue forever.
-    qcfg = svc.get("queue")
-    _recover_stale_processing(
-        db,
-        account.id,
-        timeout_s=int(qcfg.get("processing_timeout", 300)),
-        max_retries=int(qcfg.get("max_auto_retries", 3)),
-    )
-
-    items = _due_items(db, account.id, max_items=int(qcfg.get("max_tasks", 25)))
+    items = _claim_due_items(db, account.id, max_items=max_tasks)
     logger.info("drain_queue(%s) due_items=%d today=%d/%d", account.id, len(items), today_count, per_day)
     if not items:
         return 0
@@ -182,26 +215,77 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
     author_locks: dict[int, asyncio.Lock] = {}
     results = []
 
+    def _requeue(item_db: Session, item: StoryQueue, reason: str) -> None:
+        """Return an item to PENDING instead of leaving it stuck in PROCESSING.
+
+        Used for throttled / timed-out items: they get re-scheduled shortly and
+        attempted again, but never sit in an indeterminate in-flight state.
+        Items that already exceeded the auto-retry budget go to FAILED for
+        manual review via the queue API.
+        """
+        if item_db is None or item is None:
+            return
+        if item.attempts >= max_auto_retries:
+            item.status = "FAILED"
+            item.error = f"{reason} (auto-retries exhausted: {item.attempts}/{max_auto_retries})"
+            item.completed_at = _now()
+        else:
+            item.status = "PENDING"
+            item.error = reason
+            item.started_at = None
+            item.completed_at = None
+            item.scheduled_at = _now() + timedelta(seconds=30)
+        item_db.commit()
+
     async def _handle(item: StoryQueue):
+        # Serialize per account so we never exceed the connection pool
+        # (K-01): the DB session is opened only after the semaphore is
+        # acquired, which caps concurrent borrows at ``parallel``.
         async with semaphore:
-            # Sliding-window guards before each view.
-            if limiter.count_since(account.id, 60) >= per_min:
-                await asyncio.sleep(5)
-            if limiter.count_since(account.id, 3600) >= per_hour:
-                account.status = AccountStatus.FLOOD_WAIT.value
-                db.commit()
-                return {"item": item.id, "status": "LIMIT"}
+            item_db = SessionLocal()
+            try:
+                item_limiter = RateLimiter(item_db)
+                # Sliding-window guards.
+                if item_limiter.count_since(account.id, 60) >= per_min:
+                    await asyncio.sleep(5)
+                if item_limiter.count_since(account.id, 3600) >= per_hour:
+                    _requeue(item_db, item, f"hourly limit reached ({item_limiter.count_since(account.id, 3600)}/{per_hour})")
+                    results.append({"item": item.id, "status": "LIMIT"})
+                    return
+                # Serialize items for the same author so the per-author daily
+                # limit is re-evaluated after each completed view.
+                peer_id = item.story.peer_id if item.story is not None else item.id
+                author_lock = author_locks.setdefault(peer_id, asyncio.Lock())
+                async with author_lock:
+                    # Guard the whole processing unit so one wedged Telegram
+                    # request cannot block the entire drain past its timeout.
+                    try:
+                        res = await asyncio.wait_for(
+                            process_queue_item(client, account, item, item_db),
+                            timeout=task_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        _requeue(item_db, item, "processing timed out")
+                        res = {"item": item.id, "status": "TIMEOUT", "reconnect": True}
+                if isinstance(res, dict) and res.get("reconnect"):
+                    nonlocal_holder["reconnect"] = True
+                results.append(res)
+                await asyncio.sleep(0.3)  # small delay between views
+            finally:
+                item_db.close()
 
-            # Serialize items for the same author so the per-author daily
-            # limit is re-evaluated after each completed view.
-            peer_id = item.story.peer_id if item.story is not None else item.id
-            author_lock = author_locks.setdefault(peer_id, asyncio.Lock())
-            async with author_lock:
-                res = await process_queue_item(client, account, item, db)
-            results.append(res)
-            await asyncio.sleep(0.3)  # small delay between views
+    nonlocal_holder = {"reconnect": False}
+    await asyncio.gather(*(_handle(i) for i in items), return_exceptions=True)
+    reconnect_requested = nonlocal_holder["reconnect"]
 
-    await asyncio.gather(*(_handle(i) for i in items))
+    # A timed-out request usually means the client's transport is broken.
+    # Reconnect once after the batch so the next sweep starts fresh.
+    if reconnect_requested:
+        logger.warning("drain_queue(%s) request timeout detected, reconnecting client", account.id)
+        try:
+            await asyncio.wait_for(cm.reconnect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("drain_queue(%s) reconnect after timeout failed: %s", account.id, exc)
 
     processed_count = len([r for r in results if isinstance(r, dict) and r.get("status") == "VIEWED"])
 
@@ -213,7 +297,7 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
         db.commit()
         logger.warning("account %s flood wait for %ss", account.id, worst)
         await asyncio.sleep(min(worst, 60))
-    elif account.status in (AccountStatus.ACTIVE.value,):
+    elif account.status not in (AccountStatus.PAUSED.value,):
         account.status = AccountStatus.ACTIVE.value
         db.commit()
     return processed_count
@@ -221,20 +305,48 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
 
 async def run_once() -> int:
     """Single worker sweep across all accounts. Returns number of processed items."""
-    db = SessionLocal()
-    total = 0
+    # Read the candidate list with a short-lived session, then give each account
+    # its own dedicated session so status updates / commits never leak dirty
+    # state from one account into the next (see C-01 / H-13).
+    ids = []
+    read_db = SessionLocal()
     try:
-        accounts = (
-            db.query(TelegramAccount)
-            .filter(TelegramAccount.monitoring.is_(True), TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value)
+        ids = [
+            a[0]
+            for a in read_db.query(TelegramAccount.id)
+            .filter(
+                TelegramAccount.monitoring.is_(True),
+                TelegramAccount.session_path.isnot(None),
+                TelegramAccount.status != AccountStatus.DISCONNECTED.value,
+            )
             .all()
-        )
-        for account in accounts:
+        ]
+    finally:
+        read_db.close()
+
+    total = 0
+    for account_id in ids:
+        db = SessionLocal()
+        try:
+            account = db.get(TelegramAccount, account_id)
+            if account is None:
+                continue
             if account.status in (
                 AccountStatus.AUTH_REQUIRED.value,
                 AccountStatus.BANNED_OR_RESTRICTED.value,
             ):
                 continue
+            # Recover items stuck in PROCESSING (worker crash/hang) so they
+            # don't block the queue forever. Runs here — for every candidate
+            # account before draining — so a wedged drain cannot swallow the
+            # recovery step (K-01).
+            qcfg = SettingsService(db, account.user_id).get("queue")
+            _recover_stale_processing(
+                db,
+                account.id,
+                timeout_s=int(qcfg.get("processing_timeout", 300)),
+                max_retries=int(qcfg.get("max_auto_retries", 3)),
+            )
             for _attempt in range(3):
                 try:
                     processed = await asyncio.wait_for(drain_queue(db, account), timeout=ACCOUNT_DRAIN_TIMEOUT)
@@ -280,8 +392,8 @@ async def run_once() -> int:
                     )
                     db.commit()
                     break
-    finally:
-        db.close()
+        finally:
+            db.close()
     return total
 
 
@@ -304,7 +416,14 @@ def main() -> None:
 
     init_db()  # ensure tables exist even if the API hasn't booted yet
     poll = float(os.environ.get("STORYWATCHER_WORKER_POLL", "1.0"))
-    asyncio.run(run_forever(interval=poll))
+    try:
+        asyncio.run(run_forever(interval=poll))
+    except KeyboardInterrupt:
+        logger.info("queue worker interrupted, disconnecting Telegram clients")
+        try:
+            asyncio.run(cm.shutdown_all())
+        except Exception:
+            logger.exception("error disconnecting Telegram clients during worker shutdown")
 
 
 if __name__ == "__main__":

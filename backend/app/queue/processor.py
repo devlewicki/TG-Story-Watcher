@@ -5,6 +5,7 @@ This is the heart of the automation. It is used both by the background worker
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -18,6 +19,11 @@ from telethon import types
 # at except-evaluation time — a missing class there crashes the whole handler.
 _StoryIdInvalidError = getattr(errors, "StoryIdInvalidError", type("_Missing", (Exception,), {}))
 _StoryExpiredError = getattr(errors, "StoryExpiredError", type("_Missing", (Exception,), {}))
+
+# Hard timeout for a single Telegram RPC so a wedged request cannot block the
+# queue drain forever (K-01/K-02). On timeout the item is requeued and the
+# worker reconnects the client.
+RPC_TIMEOUT = 45
 
 from ..models import (
     Story,
@@ -125,7 +131,21 @@ async def process_queue_item(
     queue_item.attempts += 1
     db.commit()
 
-    peer = await _resolve_peer(client, story.peer_id)
+    peer = None
+    try:
+        peer = await asyncio.wait_for(_resolve_peer(client, story.peer_id), timeout=RPC_TIMEOUT)
+    except asyncio.TimeoutError:
+        queue_item.status = "FAILED"
+        queue_item.error = f"peer resolve timed out (peer={story.peer_id})"
+        queue_item.completed_at = _now()
+        db.commit()
+        return {"status": "FAILED", "error": queue_item.error, "reconnect": True}
+    except Exception as exc:  # noqa: BLE001
+        queue_item.status = "FAILED"
+        queue_item.error = f"peer not found: {exc}"
+        queue_item.completed_at = _now()
+        db.commit()
+        return {"status": "FAILED", "error": queue_item.error}
     if peer is None:
         queue_item.status = "FAILED"
         queue_item.error = "peer not found"
@@ -136,13 +156,22 @@ async def process_queue_item(
     try:
         # Increment the story view counter (the supported signal that a
         # story was watched), using the documented user-side MTProto method.
-        await client(functions.stories.IncrementStoryViewsRequest(peer, [story.telegram_story_id]))
+        await asyncio.wait_for(
+            client(functions.stories.IncrementStoryViewsRequest(peer, [story.telegram_story_id])),
+            timeout=RPC_TIMEOUT,
+        )
     except errors.FloodWaitError as e:
         queue_item.status = "FAILED"
         queue_item.error = f"flood_wait {e.seconds}s"
         queue_item.completed_at = _now()
         db.commit()
         return {"status": "FAILED", "error": queue_item.error, "flood_wait": e.seconds}
+    except asyncio.TimeoutError:
+        queue_item.status = "FAILED"
+        queue_item.error = "view request timed out"
+        queue_item.completed_at = _now()
+        db.commit()
+        return {"status": "FAILED", "error": queue_item.error, "reconnect": True}
     except _StoryIdInvalidError:
         queue_item.status = "EXPIRED"
         queue_item.error = "story not found (expired or deleted)"
@@ -173,12 +202,15 @@ async def process_queue_item(
         logger.warning("read view settings failed: %s", exc)
     if like_emoji:
         try:
-            await client(
-                functions.stories.SendReactionRequest(
-                    peer=peer,
-                    story_id=story.telegram_story_id,
-                    reaction=types.ReactionEmoji(emoticon=like_emoji),
-                )
+            await asyncio.wait_for(
+                client(
+                    functions.stories.SendReactionRequest(
+                        peer=peer,
+                        story_id=story.telegram_story_id,
+                        reaction=types.ReactionEmoji(emoticon=like_emoji),
+                    )
+                ),
+                timeout=RPC_TIMEOUT,
             )
             activity.log(
                 f"Story liked: peer={story.peer_id} story={story.telegram_story_id} ({like_emoji})",
@@ -189,6 +221,8 @@ async def process_queue_item(
             )
         except errors.FloodWaitError as e:
             logger.warning("story like flood wait %ss (peer=%s story=%s)", e.seconds, story.peer_id, story.telegram_story_id)
+        except asyncio.TimeoutError:
+            logger.warning("story like timed out (peer=%s story=%s)", story.peer_id, story.telegram_story_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("story like failed (peer=%s story=%s): %s", story.peer_id, story.telegram_story_id, exc)
 
@@ -216,8 +250,13 @@ async def process_queue_item(
 
 
 async def _resolve_peer(client, peer_id: int):
-    """Return a peer for the given id (raw id). Fall back to the raw id."""
-    try:
-        return await client.get_input_entity(peer_id)
-    except Exception:  # noqa: BLE001
-        return peer_id
+    """Resolve a peer id to an InputPeer object.
+
+    Raises on failure — the caller marks the queue item FAILED with the error.
+    Previously this fell back to returning the raw int, which produced a
+    cryptic TypeError when passed to IncrementStoryViewsRequest.
+    """
+    peer = await client.get_input_entity(peer_id)
+    if peer is None:
+        raise RuntimeError(f"could not resolve peer id {peer_id}")
+    return peer

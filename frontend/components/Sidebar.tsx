@@ -9,7 +9,7 @@ import { useTranslation } from "@/lib/i18n";
 import { api, type Account } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 
-type IconName = "dashboard" | "accounts" | "stories" | "queue" | "discovery" | "whitelist" | "blacklist" | "history" | "statistics" | "settings";
+type IconName = "dashboard" | "accounts" | "stories" | "queue" | "discovery" | "whitelist" | "blacklist" | "history" | "statistics" | "settings" | "trending";
 const ICONS: Record<IconName, ReactNode> = {
   dashboard: <path d="M3 3h7v7H3V3zm11 0h7v7h-7V3zM3 14h7v7H3v-7zm11 0h7v7h-7v-7z" />,
   accounts: <><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7" /></>,
@@ -20,6 +20,7 @@ const ICONS: Record<IconName, ReactNode> = {
   blacklist: <><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="m9.5 9.5 5 5M14.5 9.5l-5 5" /></>,
   history: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></>,
   statistics: <path d="M4 20V10M10 20V4M16 20v-7M21 20H3" />,
+  trending: <><path d="m3 17 6-6 4 4 8-8" /><path d="M15 7h6v6" /></>,
   settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" /></>,
 };
 function Icon({ name, className = "" }: { name: IconName; className?: string }) { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>{ICONS[name]}</svg>; }
@@ -31,7 +32,7 @@ function useNavGroups(): { title: string; items: NavItem[] }[] {
     { title: t("nav.overview"), items: [{ href: "/", labelKey: "nav.dashboard", icon: "dashboard" }] },
     { title: t("nav.monitoring"), items: [{ href: "/stories", labelKey: "nav.stories", icon: "stories" }, { href: "/queue", labelKey: "nav.queue", icon: "queue" }, { href: "/discovery", labelKey: "nav.discovery", icon: "discovery" }] },
     { title: t("nav.management"), items: [{ href: "/whitelist", labelKey: "nav.whitelist", icon: "whitelist" }, { href: "/blacklist", labelKey: "nav.blacklist", icon: "blacklist" }] },
-    { title: t("nav.analytics"), items: [{ href: "/history", labelKey: "nav.history", icon: "history" }, { href: "/analytics", labelKey: "nav.accountStats", icon: "statistics" }, { href: "/statistics", labelKey: "nav.actionStats", icon: "statistics" }] },
+    { title: t("nav.analytics"), items: [{ href: "/history", labelKey: "nav.history", icon: "history" }, { href: "/analytics", labelKey: "nav.accountStats", icon: "trending" }, { href: "/statistics", labelKey: "nav.actionStats", icon: "statistics" }] },
     { title: t("nav.system"), items: [{ href: "/settings", labelKey: "nav.settings", icon: "settings" }] },
   ];
 }

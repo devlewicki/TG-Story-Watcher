@@ -279,43 +279,52 @@ async def run_discovery_once() -> None:
     now = time.monotonic()
 
     # Collect (account, cfg) pairs for users that are due for discovery.
+    # One shared read-only session is used across all users; the only write
+    # in this loop (clearing ``force_next``) commits itself, so sharing is safe.
     pending: list[tuple[TelegramAccount, dict]] = []
-    for uid, accs in user_accounts.items():
-        db2 = SessionLocal()
-        try:
-            svc = SettingsService(db2, uid)
-            cfg = svc.get("discovery")
-            if not cfg.get("enabled"):
-                continue
+    read_db = SessionLocal()
+    try:
+        for uid, accs in user_accounts.items():
+            try:
+                svc = SettingsService(read_db, uid)
+                cfg = svc.get("discovery")
+                if not cfg.get("enabled"):
+                    continue
 
-            # Compute adaptive search parameters
-            adaptive = _compute_adaptive_search_params(db2, uid)
-            if not adaptive["should_search"]:
-                logger.debug("discovery: user %d — search not needed (queue=%d, remaining=%d)",
-                             uid, adaptive.get("queue_size", 0), adaptive.get("views_remaining", 0))
-                continue
+                # Compute adaptive search parameters
+                adaptive = _compute_adaptive_search_params(read_db, uid)
+                if not adaptive["should_search"]:
+                    logger.debug("discovery: user %d — search not needed (queue=%d, remaining=%d)",
+                                 uid, adaptive.get("queue_size", 0), adaptive.get("views_remaining", 0))
+                    continue
 
-            interval = adaptive["interval"]
-            force = bool(cfg.pop("force_next", False))
-            if force:
-                svc.set("discovery", cfg)  # clear the flag
-            last = _last_discovery_ts.get(uid, 0.0)
-            if not force and (now - last < interval):
-                continue
-            _last_discovery_ts[uid] = now
+                interval = adaptive["interval"]
+                force = bool(cfg.get("force_next", False))
+                if force:
+                    # Clear the flag without mutating ``cfg`` (it's reused below
+                    # and every consumer sees the same dict object).
+                    svc.set("discovery", {k: v for k, v in cfg.items() if k != "force_next"})
+                last = _last_discovery_ts.get(uid, 0.0)
+                if not force and (now - last < interval):
+                    continue
+                _last_discovery_ts[uid] = now
 
-            # Inject adaptive search_results_max into cfg for _discover_account
-            cfg["search_results_max"] = adaptive["search_results_max"]
-            logger.info(
-                "discovery: user %d — searching (interval=%ds, results=%d, queue=%d/%d, views=%d/%d)",
-                uid, interval, adaptive["search_results_max"],
-                adaptive.get("queue_size", 0), adaptive.get("target_queue", 0),
-                adaptive.get("views_today", 0), adaptive.get("views_remaining", 0) + adaptive.get("views_today", 0),
-            )
-        finally:
-            db2.close()
-        for acc in accs:
-            pending.append((acc, cfg))
+                # Inject adaptive search_results_max into cfg for _discover_account
+                cfg["search_results_max"] = adaptive["search_results_max"]
+                logger.info(
+                    "discovery: user %d — searching (interval=%ds, results=%d, queue=%d/%d, views=%d/%d)",
+                    uid, interval, adaptive["search_results_max"],
+                    adaptive.get("queue_size", 0), adaptive.get("target_queue", 0),
+                    adaptive.get("views_today", 0), adaptive.get("views_remaining", 0) + adaptive.get("views_today", 0),
+                )
+            except Exception:
+                logger.exception("discovery: user %d — scheduling failed", uid)
+                read_db.rollback()
+                continue
+            for acc in accs:
+                pending.append((acc, cfg))
+    finally:
+        read_db.close()
 
     # Round-robin: pick one account per user per iteration so that a single
     # large user (500+ hashtags) does not block smaller users.
@@ -449,9 +458,10 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         # to avoid flooding Telegram with hundreds of requests per cycle.
         geo_budget = max(5, min(30, len(geo_venues) // 10 + 5)) if geo_venues else 0
         if geo_venues and geo_budget > 0:
-            g_offset = _geo_venue_offset.get(uid, 0) % len(geo_venues)
+            full_geo_count = len(geo_venues)
+            g_offset = _geo_venue_offset.get(uid, 0) % full_geo_count
             geo_venues = (geo_venues[g_offset:] + geo_venues[:g_offset])[:geo_budget]
-            _geo_venue_offset[uid] = (g_offset + geo_budget) % len(geo_venues)
+            _geo_venue_offset[uid] = (g_offset + geo_budget) % full_geo_count
             logger.info("geo-search: using %d/%d venues (budget=%d)", len(geo_venues), geo_budget, geo_budget)
 
         locations = manual_locations + auto_locations + geo_venues

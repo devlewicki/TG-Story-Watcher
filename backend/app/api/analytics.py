@@ -16,11 +16,34 @@ def _story(db,story_id,user_id):
 def _summary(db,s):
  snap=db.query(StoryStatsSnapshot).filter_by(story_id=s.id).order_by(StoryStatsSnapshot.collected_at.desc()).first(); rs=db.query(StoryReactionStat).filter_by(story_id=s.id).all(); v=snap.views_count if snap else None; r=snap.reactions_count if snap else None; f=snap.forwards_count if snap else None
  return {"story_id":s.id,"telegram_story_id":s.telegram_story_id,"views":v,"reactions":r,"forwards":f,"known_viewers":db.query(StoryViewer).filter_by(story_id=s.id).count(),"er":((r or 0)+(f or 0))/v*100 if v else None,"reaction_breakdown":{x.reaction:x.count for x in rs},"published_at":s.published_at}
+def _summaries_batch(db, stories):
+ """Batch summary for many Story objects — 3 bulk queries instead of 3 per story
+ (avoids the N+1 pattern in /stories and /overview). Preserves the exact
+ output shape of ``_summary``."""
+ from sqlalchemy import func as sa_func
+ ids=[s.id for s in stories]
+ latest={}; viewer_counts={}; reactions_by={}
+ if ids:
+  latest_ids=db.query(sa_func.max(StoryStatsSnapshot.id)).filter(StoryStatsSnapshot.story_id.in_(ids)).group_by(StoryStatsSnapshot.story_id).all()
+  snap_ids=[row[0] for row in latest_ids if row[0]]
+  if snap_ids:
+   for snap in db.query(StoryStatsSnapshot).filter(StoryStatsSnapshot.id.in_(snap_ids)).all():
+    latest[snap.story_id]=snap
+  for sid,cnt in db.query(StoryViewer.story_id,sa_func.count(StoryViewer.id)).filter(StoryViewer.story_id.in_(ids)).group_by(StoryViewer.story_id).all():
+   viewer_counts[sid]=cnt
+  for rr in db.query(StoryReactionStat).filter(StoryReactionStat.story_id.in_(ids)).all():
+   reactions_by.setdefault(rr.story_id,{})[rr.reaction]=rr.count
+ out=[]
+ for s in stories:
+  snap=latest.get(s.id); v=snap.views_count if snap else None; r=snap.reactions_count if snap else None; f=snap.forwards_count if snap else None
+  out.append({"story_id":s.id,"telegram_story_id":s.telegram_story_id,"views":v,"reactions":r,"forwards":f,"known_viewers":viewer_counts.get(s.id,0),"er":((r or 0)+(f or 0))/v*100 if v else None,"reaction_breakdown":reactions_by.get(s.id,{}),"published_at":s.published_at})
+ return out
 @router.get("/stories")
 def stories(db:Db,user_id:Annotated[int,Depends(current_user_id)],account_id:int|None=None,limit:int=Query(100,le=500),offset:int=0):
  q=db.query(Story).join(TelegramAccount).filter(Story.source=="analytics",TelegramAccount.user_id==user_id)
  if account_id:q=q.filter(Story.account_id==account_id)
- return [_summary(db,s) for s in q.order_by(Story.published_at.desc().nullslast(),Story.id.desc()).offset(offset).limit(limit)]
+ rows=q.order_by(Story.published_at.desc().nullslast(),Story.id.desc()).offset(offset).limit(limit).all()
+ return _summaries_batch(db,rows)
 @router.get("/stories/{story_id}")
 def one(story_id:int,db:Db,user_id:Annotated[int,Depends(current_user_id)]):return _summary(db,_story(db,story_id,user_id))
 @router.get("/stories/{story_id}/views")
@@ -125,7 +148,7 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
    else:
      # Period mode: use SQL-level aggregation for performance
      from sqlalchemy import text
-     story_id_list = ",".join(str(i) for i in story_ids)
+     story_id_list = ",".join(str(int(i)) for i in story_ids)
      query = text(f"""
        WITH daily_last AS (
          SELECT DISTINCT ON (story_id, day)
@@ -140,7 +163,7 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
                ORDER BY collected_at DESC
              ) AS rn
            FROM story_stats_snapshots
-           WHERE story_id IN ({story_id_list})
+           WHERE story_id = ANY(ARRAY[{story_id_list}]::bigint[])
            AND collected_at >= :start_utc - INTERVAL '1 day'
          ) sub WHERE rn = 1
        ),
@@ -198,7 +221,8 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
    known_viewers = 0
 
  # Top stories: sort by current views (always show all)
- a = [_summary(db, db.get(Story, sid)) for sid in story_ids]
+ stories_objs = db.query(Story).filter(Story.id.in_(story_ids)).all() if story_ids else []
+ a = _summaries_batch(db, stories_objs)
  avg_er = ((total_reactions + total_forwards) / total_views * 100) if total_views > 0 else 0
 
  return {
@@ -260,7 +284,7 @@ def daily_analytics(db:Db,user_id:Annotated[int,Depends(current_user_id)],period
 
  # SQL-level aggregation: get last snapshot per story per day, compute deltas
  # This avoids loading 100K+ snapshots into Python.
- story_id_list = ",".join(str(i) for i in story_ids)
+ story_id_list = ",".join(str(int(i)) for i in story_ids)
 
  # Step 1: Get the last snapshot per story per calendar day (in user tz)
  # Step 2: Use LAG() to get previous day's values per story
@@ -284,7 +308,7 @@ def daily_analytics(db:Db,user_id:Annotated[int,Depends(current_user_id)],period
            ORDER BY collected_at DESC
          ) AS rn
        FROM story_stats_snapshots
-       WHERE story_id IN ({story_id_list})
+       WHERE story_id = ANY(ARRAY[{story_id_list}]::bigint[])
        AND collected_at >= :start_utc - INTERVAL '1 day'
      ) sub
      WHERE rn = 1

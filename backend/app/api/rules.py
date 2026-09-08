@@ -5,7 +5,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel as _BM
+from pydantic import BaseModel as _BM, Field
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -25,7 +25,7 @@ class RuleIn(_BM):
     name: str
     enabled: bool = True
     source_type: str = "monitor"
-    config: dict = {}
+    config: dict = Field(default_factory=dict)
     priority: int = 0
 
 
@@ -70,7 +70,7 @@ def patch_rule(rule_id: int, payload: RuleIn, db: Db, user_id: Annotated[int, De
 
 
 @router.delete("/{rule_id}")
-def delete_rule(rule_id: int, db: Db):
+def delete_rule(rule_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
@@ -80,7 +80,7 @@ def delete_rule(rule_id: int, db: Db):
 
 
 @router.post("/{rule_id}/enable")
-def enable_rule(rule_id: int, db: Db):
+def enable_rule(rule_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
@@ -90,7 +90,7 @@ def enable_rule(rule_id: int, db: Db):
 
 
 @router.post("/{rule_id}/disable")
-def disable_rule(rule_id: int, db: Db):
+def disable_rule(rule_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:
         raise HTTPException(status_code=404, detail="rule not found")
@@ -100,7 +100,7 @@ def disable_rule(rule_id: int, db: Db):
 
 
 @router.post("/{rule_id}/test")
-def test_rule(rule_id: int, db: Db):
+def test_rule(rule_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     """Lightweight validation test - verifies the rule config is well-formed JSON."""
     r = db.query(AutomationRule).join(TelegramAccount).filter(AutomationRule.id == rule_id, TelegramAccount.user_id == user_id).first()
     if r is None:

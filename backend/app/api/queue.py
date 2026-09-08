@@ -10,7 +10,7 @@ from sqlalchemy import orm
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import StoryQueue, TelegramAccount
+from ..models import QueueStatus, StoryQueue, TelegramAccount
 from .deps import require_api_token, current_user_id
 from .schemas import QueueItemOut, queue_out
 
@@ -53,6 +53,30 @@ def count_queue(
     if status is not None:
         q = q.filter(StoryQueue.status == status)
     return {"count": q.count()}
+
+
+@router.get("/stats")
+def queue_stats(
+    db: Db,
+    user_id: Annotated[int, Depends(current_user_id)],
+    account_id: int | None = None,
+):
+    """Aggregated queue counts per status in a single GROUP BY query."""
+    from sqlalchemy import func
+
+    q = db.query(StoryQueue.status, func.count(StoryQueue.id)).join(TelegramAccount).filter(
+        TelegramAccount.user_id == user_id
+    )
+    if account_id is not None:
+        q = q.filter(StoryQueue.account_id == account_id)
+    per_status = dict(q.group_by(StoryQueue.status).all())
+    active = sum(per_status.get(s, 0) for s in ("PENDING", "WAITING_DELAY", "PROCESSING"))
+    return {
+        "total": sum(per_status.values()),
+        "active": active,
+        "viewed": per_status.get("VIEWED", 0),
+        "failed": per_status.get("FAILED", 0),
+    }
 
 
 @router.post("/{item_id}/cancel")
@@ -103,6 +127,8 @@ def patch_item(item_id: int, payload: QueuePatch, db: Db, user_id: Annotated[int
     if item is None:
         raise HTTPException(status_code=404, detail="queue item not found")
     if payload.status is not None:
+        if payload.status not in {q.value for q in QueueStatus}:
+            raise HTTPException(status_code=422, detail=f"invalid status: {payload.status!r}")
         item.status = payload.status
     if payload.scheduled_at is not None:
         item.scheduled_at = payload.scheduled_at
@@ -115,10 +141,22 @@ def patch_item(item_id: int, payload: QueuePatch, db: Db, user_id: Annotated[int
 
 @router.delete("/clear")
 def clear_queue(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
-    q = db.query(StoryQueue).join(TelegramAccount).filter(TelegramAccount.user_id == user_id)
-    for item in q.all():
-        if item.status not in ("VIEWED", "FAILED", "EXPIRED"):
-            item.status = "CANCELLED"
-            item.completed_at = datetime.now(timezone.utc)
+    from sqlalchemy import update
+
+    now = datetime.now(timezone.utc)
+    # Bulk UPDATE in a single statement instead of loading + toggling each item.
+    db.execute(
+        update(StoryQueue)
+        .where(
+            StoryQueue.id.in_(
+                db.query(StoryQueue.id)
+                .join(TelegramAccount, StoryQueue.account_id == TelegramAccount.id)
+                .filter(TelegramAccount.user_id == user_id)
+                .filter(StoryQueue.status.not_in_(["VIEWED", "FAILED", "EXPIRED"]))
+            ),
+            StoryQueue.status.not_in_(["VIEWED", "FAILED", "EXPIRED"]),
+        )
+        .values(status="CANCELLED", completed_at=now)
+    )
     db.commit()
     return {"ok": True}

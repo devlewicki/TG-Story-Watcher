@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type Story } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { useTranslation } from "@/lib/i18n";
-import { Avatar, Card, Empty, ErrorBanner, Spinner, Button } from "@/components/ui";
+import { Avatar, Button, Card, Empty, ErrorBanner, Icon, PageHeader, PageLoading } from "@/components/ui";
 import { formatTime } from "@/lib/format";
 
 const PAGE = 200;
@@ -41,7 +41,7 @@ export default function StoriesPage() {
     load(0, false);
   }, [load]);
 
-  if (loading) return <Spinner />;
+  if (loading) return <PageLoading />;
   if (error && !items) return <ErrorBanner message={error} />;
 
   const list = items ?? [];
@@ -49,10 +49,10 @@ export default function StoriesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{t("stories.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+      <PageHeader
+        title={t("stories.title")}
+        subtitle={
+          <>
             {shown < total
               ? t("stories.shown", { shown, total })
               : t("stories.count", { total, one: total, few: total, many: total })}
@@ -60,10 +60,15 @@ export default function StoriesPage() {
             <Link href="/" className="text-emerald-600 hover:underline dark:text-emerald-400">
               {t("stories.liveFeed")}
             </Link>
-          </p>
-        </div>
-        <Button variant="secondary" onClick={() => load(0, false)}>{t("common.refresh")}</Button>
-      </div>
+          </>
+        }
+        right={
+          <Button variant="secondary" onClick={() => load(0, false)}>
+            <Icon name="refresh" className="h-4 w-4" />
+            {t("common.refresh")}
+          </Button>
+        }
+      />
 
       {error && <ErrorBanner message={error} />}
 
@@ -96,7 +101,7 @@ export default function StoriesPage() {
                           <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400">
                             {t("stories.viewed")} {formatTime(s.last_viewed_at)}
                           </span>
-                          <span>👁 {s.view_count}</span>
+                          <span className="inline-flex items-center gap-1"><Icon name="eye" className="h-3.5 w-3.5" /> {s.view_count}</span>
                         </>
                       ) : (
                         <span>{t("stories.notViewed")}</span>
@@ -115,17 +120,7 @@ export default function StoriesPage() {
                       {s.like_emoji || "❤️"}
                     </span>
                   ) : (
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="h-4 w-4 text-slate-300 dark:text-slate-600"
-                    >
-                      <path d="M12 21C7 16.5 2.5 13 2.5 8.8 2.5 6 4.6 4 7.2 4c1.8 0 3.4 1 4.8 2.6C13.4 5 15 4 16.8 4c2.6 0 4.7 2 4.7 4.8 0 4.2-4.5 7.7-9.5 12.2z" />
-                    </svg>
+                    <Icon name="heart" className="h-4 w-4 text-slate-300 dark:text-slate-600" />
                   )}
                   <span className="w-24 shrink-0 text-right text-xs text-slate-400">
                     {s.last_viewed_at ? "" : formatTime(s.published_at)}

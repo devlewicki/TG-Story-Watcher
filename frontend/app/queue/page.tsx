@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, type QueueItem } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
-import { Avatar, Badge, Button, Card, Empty, ErrorBanner, Spinner } from "@/components/ui";
+import { Avatar, Badge, Button, Card, Empty, ErrorBanner, Icon, IconButton, PageHeader, PageLoading } from "@/components/ui";
 import { formatTime } from "@/lib/format";
 
-const ACTIVE = ["PENDING", "WAITING_DELAY", "PROCESSING"];
 const PAGE = 200;
 
 function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: number) => void; onRetry: (id: number) => void }) {
@@ -37,7 +36,7 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
           )}
         </div>
       </div>
-      <span className="w-28 shrink-0 text-right text-xs text-slate-400">
+      <span className="hidden shrink-0 text-right text-xs text-slate-400 sm:block">
         {formatTime(item.scheduled_at)}
       </span>
       <div className="flex w-24 shrink-0 justify-end gap-1">
@@ -45,27 +44,18 @@ function ItemRow({ item, onCancel, onRetry }: { item: QueueItem; onCancel: (id: 
       </div>
       <div className="flex w-20 shrink-0 items-center justify-end gap-1">
         {!["VIEWED", "CANCELLED"].includes(item.status) && (
-          <button
+          <IconButton
+            label={t("queue.cancel")}
             onClick={() => onCancel(item.id)}
-            title={t("queue.cancel")}
-            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+            className="hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="h-4 w-4">
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
+            <Icon name="close" className="h-4 w-4" />
+          </IconButton>
         )}
         {item.status === "FAILED" && (
-          <button
-            onClick={() => onRetry(item.id)}
-            title={t("queue.retry")}
-            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-700 dark:hover:text-slate-200"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-              <path d="M20 11a8 8 0 1 0-2 5.3" />
-              <path d="M20 4v7h-7" />
-            </svg>
-          </button>
+          <IconButton label={t("queue.retry")} onClick={() => onRetry(item.id)}>
+            <Icon name="refresh" className="h-4 w-4" />
+          </IconButton>
         )}
       </div>
     </li>
@@ -76,6 +66,7 @@ export default function QueuePage() {
   const { t } = useTranslation();
   const [items, setItems] = useState<QueueItem[] | null>(null);
   const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState({ active: 0, viewed: 0, failed: 0, total: 0 });
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -85,11 +76,21 @@ export default function QueuePage() {
     else setLoading(true);
     setError("");
     try {
-      const [list, cnt] = await Promise.all([
+      const [list, statsData] = await Promise.all([
         api.get<QueueItem[]>(`/queue?limit=${PAGE}&offset=${offset}`),
-        append ? Promise.resolve(null) : api.get<{ count: number }>("/queue/count"),
+        append
+          ? Promise.resolve(null)
+          : api.get<{ total: number; active: number; viewed: number; failed: number }>("/queue/stats"),
       ]);
-      setTotal(cnt?.count ?? 0);
+      if (statsData) {
+        setTotal(statsData.total);
+        setStats({
+          active: statsData.active,
+          viewed: statsData.viewed,
+          failed: statsData.failed,
+          total: statsData.total,
+        });
+      }
       setItems((prev) => (append ? [...(prev ?? []), ...list] : list));
     } catch (e) {
       setError((e as Error).message);
@@ -112,17 +113,7 @@ export default function QueuePage() {
     }
   };
 
-  const stats = useMemo(() => {
-    const list = items ?? [];
-    return {
-      active: list.filter((i) => ACTIVE.includes(i.status)).length,
-      viewed: list.filter((i) => i.status === "VIEWED").length,
-      failed: list.filter((i) => i.status === "FAILED").length,
-      total: list.length,
-    };
-  }, [items]);
-
-  if (loading) return <Spinner />;
+  if (loading) return <PageLoading />;
   if (error && !items) return <ErrorBanner message={error} />;
 
   const list = items ?? [];
@@ -130,29 +121,33 @@ export default function QueuePage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{t("queue.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            {shown === 0
-              ? t("queue.empty")
-              : shown < total
-              ? `${stats.active} ${t("queue.active")} · ${stats.viewed} ${t("queue.viewed")} · ${t("queue.shown")} ${shown}/${total}`
-              : `${stats.active} ${t("queue.active")} · ${stats.viewed} ${t("queue.viewed")} ${t("dashboard.of")} ${total}${stats.failed ? ` · ${stats.failed} ${t("queue.errors")}` : ""}`}
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => load(0, false)}>{t("common.refresh")}</Button>
-          <Button
-            variant="danger"
-            onClick={() => {
-              if (confirm(t("queue.clearConfirm"))) act("/queue/clear");
-            }}
-          >
-            {t("queue.clear")}
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title={t("queue.title")}
+        subtitle={
+          shown === 0
+            ? t("queue.empty")
+            : shown < total
+            ? `${stats.active} ${t("queue.active")} · ${stats.viewed} ${t("queue.viewed")} · ${t("queue.shown")} ${shown}/${total}`
+            : `${stats.active} ${t("queue.active")} · ${stats.viewed} ${t("queue.viewed")} ${t("dashboard.of")} ${total}${stats.failed ? ` · ${stats.failed} ${t("queue.errors")}` : ""}`
+        }
+        right={
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => load(0, false)}>
+              <Icon name="refresh" className="h-4 w-4" />
+              {t("common.refresh")}
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (confirm(t("queue.clearConfirm"))) act("/queue/clear");
+              }}
+            >
+              <Icon name="trash" className="h-4 w-4" />
+              {t("queue.clear")}
+            </Button>
+          </div>
+        }
+      />
 
       {error && <ErrorBanner message={error} />}
 

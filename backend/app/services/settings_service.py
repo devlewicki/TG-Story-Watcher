@@ -102,39 +102,61 @@ class SettingsService:
         return data
 
     def get(self, s):
-        row = self.db.get(SettingsStore, self._key(s))
-        if not row:
-            return dict(self.DEFAULTS.get(s, {}))
-        try:
-            data = self._merge(s, json.loads(row.value or "{}"))
-        except json.JSONDecodeError:
-            return dict(self.DEFAULTS.get(s, {}))
+        # Resolve stored values for every section in one query, then derive
+        # the requested one.  Avoids the extra per-call limits lookup that
+        # previously made get("view"/"queue"/"monitoring") do 2-3 reads.
+        return self._derive(s, self._load_all())
+
+    def _load_all(self) -> dict[str, dict]:
+        rows = self.db.query(SettingsStore).filter(
+            SettingsStore.key.in_([self._key(s) for s in self.DEFAULTS])
+        ).all()
+        raw = {s: {} for s in self.DEFAULTS}
+        for r in rows:
+            s = self._section_from_key(r.key)
+            if s is None:
+                continue
+            try:
+                raw[s] = json.loads(r.value or "{}")
+            except json.JSONDecodeError:
+                raw[s] = {}
+        return raw
+
+    def _section_from_key(self, key: str) -> str | None:
+        if self.user_id is not None and key.startswith(f"user:{self.user_id}:"):
+            key = key[len(f"user:{self.user_id}:"):]
+        return key if key in self.DEFAULTS else None
+
+    def _derive(self, s: str, all_raw: dict[str, dict]) -> dict:
+        stored = all_raw.get(s, {})
+        data = self._merge(s, stored)
         # Always re-derive limits from daily
         if s == "limits":
             data = self._rederive_from_daily(data)
         # Re-derive view delays and queue from daily
         elif s in ("view", "queue", "monitoring"):
-            # Find the stored daily limit to recompute
-            limits_row = self.db.get(SettingsStore, self._key("limits"))
-            if limits_row:
-                try:
-                    ld = json.loads(limits_row.value or "{}")
-                    daily = int(ld.get("views_per_day", 800))
-                except (json.JSONDecodeError, ValueError):
-                    daily = 800
-            else:
+            ld = all_raw.get("limits", {})
+            try:
+                daily = int(ld.get("views_per_day", 800))
+            except (ValueError, TypeError):
                 daily = 800
             derived = compute_all_from_daily(daily)
             if s in derived:
                 for k, v in derived[s].items():
-                    # Only overwrite auto-computed values, preserve user settings
+                    # Preserve explicit user overrides: never clobber a key the
+                    # user stored with an auto-derived value (e.g. custom
+                    # min_delay/max_delay in the view section).
+                    if k in stored:
+                        continue
+                    # Keep non-derived view settings as-is too.
                     if s == "view" and k in ("auto_like", "like_emoji", "max_stories_per_user_per_day"):
                         continue
                     data[k] = v
         return data
 
     def get_all(self):
-        return {s: self.get(s) for s in self.DEFAULTS}
+        all_raw = self._load_all()
+        return {s: self._derive(s, all_raw) for s in self.DEFAULTS}
 
     def set(self, s, v):
         key = self._key(s)
@@ -143,8 +165,11 @@ class SettingsService:
 
         # When limits are saved, enforce cap and recompute all derived sections
         if s == "limits" and "views_per_day" in merged:
-            daily = min(int(merged["views_per_day"]), 12000)
-            daily = max(50, daily)
+            try:
+                daily = int(merged["views_per_day"])
+            except (ValueError, TypeError):
+                daily = 800
+            daily = max(50, min(12000, daily))
             derived = compute_all_from_daily(daily)
             merged.update(derived["limits"])
 
@@ -160,7 +185,11 @@ class SettingsService:
         limits_input = values.get("limits", {})
         daily_raw = limits_input.get("views_per_day")
         if daily_raw is not None:
-            daily = max(50, min(12000, int(daily_raw)))
+            try:
+                daily = int(daily_raw)
+            except (ValueError, TypeError):
+                daily = 800
+            daily = max(50, min(12000, daily))
             derived = compute_all_from_daily(daily)
             # Inject derived values into each section before saving
             for section_name, section_derived in derived.items():

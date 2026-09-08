@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ActivityEvent, type View } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
-import { Button, Badge, Card, CardHeader, Empty, ErrorBanner, Spinner } from "@/components/ui";
+import { Button, Badge, Card, CardHeader, Empty, ErrorBanner, Icon, PageHeader, PageLoading, Segmented } from "@/components/ui";
 import { formatTime, timeAgo } from "@/lib/format";
 
 const PAGE = 300;
@@ -72,39 +72,35 @@ export default function HistoryPage() {
     else loadAct(shown, true);
   };
 
-  if (viewsLoading || actLoading) return <Spinner />;
+  if (viewsLoading || actLoading) return <PageLoading />;
   if (error && !list) return <ErrorBanner message={error} />;
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">{t("history.title")}</h1>
-        <Button
-          variant="secondary"
-          onClick={() => {
-            if (tab === "views") loadViews(0, false);
-            else loadAct(0, false);
-          }}
-        >
-          {t("common.refresh")}
-        </Button>
-      </div>
-
-      <div className="flex gap-1">
-        {(["views", "activity"] as const).map((tabKey) => (
-          <button
-            key={tabKey}
-            onClick={() => setTab(tabKey)}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
-              tab === tabKey
-                ? "bg-emerald-600 text-white"
-                : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
+      <PageHeader
+        title={t("history.title")}
+        right={
+          <Button
+            variant="secondary"
+            onClick={() => {
+              if (tab === "views") loadViews(0, false);
+              else loadAct(0, false);
+            }}
           >
-            {tabKey === "views" ? t("history.storyViews") : t("history.activityLog")}
-          </button>
-        ))}
-      </div>
+            <Icon name="refresh" className="h-4 w-4" />
+            {t("common.refresh")}
+          </Button>
+        }
+      />
+
+      <Segmented
+        value={tab}
+        onChange={setTab}
+        options={[
+          { value: "views" as const, label: t("history.storyViews") },
+          { value: "activity" as const, label: t("history.activityLog") },
+        ]}
+      />
 
       {error && <ErrorBanner message={error} />}
 
@@ -154,7 +150,7 @@ export default function HistoryPage() {
           ) : (
             <ul className="divide-y divide-slate-100 dark:divide-slate-800">
               {(act ?? []).map((e: ActivityEvent) => (
-                <li key={e.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                <li key={e.id} className="flex min-w-0 items-center gap-3 px-5 py-3 text-sm">
                   <Badge status={e.level === "ERROR" ? "ERROR" : e.event_type === "story_viewed" ? "VIEWED" : e.event_type === "story_queued" ? "PENDING" : e.level} />
                   <span className="flex-1 truncate text-slate-700 dark:text-slate-200">{e.message}</span>
                   <span className="text-xs text-slate-400">{timeAgo(e.created_at)}</span>

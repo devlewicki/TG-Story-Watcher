@@ -18,7 +18,7 @@ import {
 import { api } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { useTranslation, useLocale } from "@/lib/i18n";
-import { Card, CardHeader, Empty, ErrorBanner, Spinner, StatCard } from "@/components/ui";
+import { Card, CardHeader, Empty, ErrorBanner, Icon, PageHeader, PageLoading, Segmented, StatCard } from "@/components/ui";
 
 type Stats = {
   period_days: number;
@@ -83,15 +83,6 @@ const QUEUE_STATUS_COLORS: Record<string, string> = {
   CANCELLED: "bg-slate-400",
 };
 
-const iconProps = {
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-  className: "h-5 w-5",
-};
-
 const AXIS_TICK = { fontSize: 11, fill: "#94a3b8" };
 
 function ChartTooltip({ active, payload, label }: any) {
@@ -118,7 +109,7 @@ export default function StatisticsPage() {
     [days]
   );
 
-  if (loading) return <Spinner />;
+  if (loading) return <PageLoading />;
   if (error) return <ErrorBanner message={error} />;
   if (!data) return <Empty label={t("statistics.noData")} />;
 
@@ -142,36 +133,27 @@ export default function StatisticsPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">{t("statistics.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            {t("statistics.subtitle", { days })}
-          </p>
-        </div>
-        <div className="flex rounded-xl border border-slate-300 p-0.5 dark:border-slate-700">
-          {[1, 7, 14, 30].map((d) => (
-            <button
-              key={d}
-              onClick={() => setDays(d)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                days === d
-                  ? "bg-emerald-600 text-white shadow-sm"
-                  : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
-              }`}
-            >
-              {d} {t("statistics.day")}
-            </button>
-          ))}
-        </div>
-      </div>
+      <PageHeader
+        title={t("statistics.title")}
+        subtitle={t("statistics.subtitle", { days })}
+        right={
+          <Segmented
+            value={String(days)}
+            onChange={(d) => setDays(Number(d))}
+            options={[1, 7, 14, 30].map((d) => ({
+              value: String(d),
+              label: `${d} ${t("statistics.day")}`,
+            }))}
+          />
+        }
+      />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard label={t("statistics.views")} value={data.views_total} accent icon={<EyeIcon />} />
-        <StatCard label={t("statistics.likes")} value={data.likes_total} icon={<HeartIcon />} accentKey="red" />
-        <StatCard label={t("statistics.foundStories")} value={data.stories_found} icon={<SearchIcon />} accentKey="sky" />
-        <StatCard label={t("statistics.filtered")} value={data.skipped_total} icon={<FilterIcon />} accentKey="amber" />
-        <StatCard label={t("statistics.errors")} value={data.errors_total} icon={<AlertIcon />} accentKey={data.errors_total > 0 ? "red" : "default"} />
+        <StatCard label={t("statistics.views")} value={data.views_total} accent icon={<Icon name="eye" />} />
+        <StatCard label={t("statistics.likes")} value={data.likes_total} icon={<Icon name="heart" />} accentKey="red" />
+        <StatCard label={t("statistics.foundStories")} value={data.stories_found} icon={<Icon name="search" />} accentKey="sky" />
+        <StatCard label={t("statistics.filtered")} value={data.skipped_total} icon={<Icon name="funnel" />} accentKey="amber" />
+        <StatCard label={t("statistics.errors")} value={data.errors_total} icon={<Icon name="alert" />} accentKey={data.errors_total > 0 ? "red" : "default"} />
       </div>
 
       <div className="grid gap-5 lg:grid-cols-2">
@@ -340,45 +322,5 @@ export default function StatisticsPage() {
         </Card>
       )}
     </div>
-  );
-}
-
-function EyeIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-function HeartIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <path d="M12 21C7 16.5 2.5 13 2.5 8.8 2.5 6 4.6 4 7.2 4c1.8 0 3.4 1 4.8 2.6C13.4 5 15 4 16.8 4c2.6 0 4.7 2 4.7 4.8 0 4.2-4.5 7.7-9.5 12.2z" />
-    </svg>
-  );
-}
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-3.5-3.5" />
-    </svg>
-  );
-}
-function FilterIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <path d="M4 5h16l-6 7v6l-4 2v-8L4 5z" />
-    </svg>
-  );
-}
-function AlertIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <path d="M12 3 2 20h20L12 3z" />
-      <path d="M12 10v4" />
-      <path d="M12 17.5h.01" strokeWidth="2.6" />
-    </svg>
   );
 }

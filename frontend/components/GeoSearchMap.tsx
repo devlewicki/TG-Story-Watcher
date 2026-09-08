@@ -7,6 +7,8 @@ import {
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { api } from "@/lib/api";
+import { useTranslation } from "@/lib/i18n";
+import { Icon } from "@/components/ui";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                              */
@@ -86,6 +88,7 @@ export default function GeoSearchMap({
   onConfigChange: (lat: number, lng: number, radiusKm: number) => void;
   onSearchComplete?: (result: GeoSearchResponse) => void;
 }) {
+  const { t } = useTranslation();
   const defaultCenter: [number, number] = [57.15, 65.53];
   const [center, setCenter] = useState<[number, number]>(
     geoLat != null && geoLng != null ? [geoLat, geoLng] : defaultCenter
@@ -161,27 +164,31 @@ export default function GeoSearchMap({
 
   // My location
   const goMyLocation = () => {
-    if (!navigator.geolocation) { setError("Geolocation not supported"); return; }
+    if (!navigator.geolocation) { setError(t("discovery.geolocationUnsupported")); return; }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const loc: [number, number] = [pos.coords.latitude, pos.coords.longitude];
         setMyLocation(loc); setPin(loc); setCenter(loc); setZoom(13); setNote(""); setError("");
         onConfigChange(loc[0], loc[1], radiusKm);
       },
-      () => setError("Could not determine your location."),
+      () => setError(t("discovery.geolocationFailed")),
       { enableHighAccuracy: true, timeout: 10000 }
     );
   };
 
   // One-time search
   const runSearch = async () => {
-    if (!pin) { setError("Click on the map or search for an address"); return; }
+    if (!pin) { setError(t("discovery.clickToSetCenter")); return; }
     setSearching(true); setError(""); setNote("");
     try {
       const res = await api.post<GeoSearchResponse>("/discovery/geo-search", {
         lat: pin[0], lng: pin[1], radius_km: radiusKm,
       });
-      setNote(`Found ${res.venues_found} venues, added ${res.venues_added} new to search. Total locations: ${res.total_locations}`);
+      setNote(t("discovery.venuesFoundNote", {
+        found: res.venues_found,
+        added: res.venues_added,
+        total: res.total_locations,
+      }));
       onSearchComplete?.(res);
     } catch (e) { setError((e as Error).message); }
     setSearching(false);
@@ -203,10 +210,9 @@ export default function GeoSearchMap({
           <input value={addrQuery} onChange={(e) => onAddrInput(e.target.value)}
             onFocus={() => addrSuggestions.length > 0 && setShowAddrSugg(true)}
             onBlur={() => setTimeout(() => setShowAddrSugg(false), 200)}
-            placeholder="Search address (e.g. Ленинский проспект 57)…"
-            className="w-full rounded-xl border border-slate-300 bg-white pl-9 pr-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-            className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+            placeholder={t("discovery.addressSearchPlaceholder")}
+            className="w-full rounded-xl border border-slate-300 bg-white py-2 pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-800" />
+          <Icon name="search" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           {showAddrSugg && addrSuggestions.length > 0 && (
             <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800">
               {addrSuggestions.map((s, i) => (
@@ -221,28 +227,26 @@ export default function GeoSearchMap({
         </div>
         <button onClick={goMyLocation}
           className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-          title="My location">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
-            <circle cx="12" cy="12" r="3" /><path d="M12 2v4m0 12v4M2 12h4m12 0h4" />
-          </svg>
-          My location
+          title={t("discovery.myLocation")}>
+          <Icon name="crosshair" className="h-4 w-4" />
+          {t("discovery.myLocation")}
         </button>
         <button onClick={runSearch} disabled={searching || !pin}
           className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm shadow-emerald-600/30 transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700">
           {searching ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-            : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>}
-          {searching ? "Searching…" : "Search now"}
+            : <Icon name="search" className="h-4 w-4" />}
+          {searching ? t("discovery.searching") : t("discovery.searchNow")}
         </button>
       </div>
 
       {/* Radius */}
       <div className="flex items-center gap-3">
-        <label className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">Radius:</label>
+        <label className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">{t("discovery.radiusLabel")}</label>
         <input type="range" min={1} max={50} step={1} value={radiusKm}
           onChange={(e) => onRadiusChange(Number(e.target.value))}
           className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-emerald-600 dark:bg-slate-700" />
-        <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-sm font-semibold tabular-nums text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400 min-w-[52px] text-center">
-          {radiusKm} km
+        <span className="min-w-[52px] rounded-lg bg-emerald-50 px-2.5 py-1 text-center text-sm font-semibold tabular-nums text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
+          {radiusKm} {t("discovery.kmShort")}
         </span>
       </div>
 
@@ -266,14 +270,14 @@ export default function GeoSearchMap({
           {pin && (
             <Marker position={pin} icon={pinIcon}>
               <Popup><div className="text-sm">
-                <div className="font-medium">Search center</div>
+                <div className="font-medium">{t("discovery.searchCenter")}</div>
                 <div className="text-xs text-slate-500">{pin[0].toFixed(5)}, {pin[1].toFixed(5)}</div>
               </div></Popup>
             </Marker>
           )}
 
           {/* My location */}
-          {myLocation && <Marker position={myLocation} icon={myLocationIcon}><Popup><div className="text-sm font-medium">My location</div></Popup></Marker>}
+          {myLocation && <Marker position={myLocation} icon={myLocationIcon}><Popup><div className="text-sm font-medium">{t("discovery.myLocation")}</div></Popup></Marker>}
 
           {/* Venues */}
           {venues.map((v) => (
@@ -281,7 +285,7 @@ export default function GeoSearchMap({
               <Popup><div className="min-w-[160px]">
                 <div className="text-sm font-semibold text-slate-900">{v.title}</div>
                 {v.address && <div className="text-xs text-slate-500">{v.address}</div>}
-                <div className="mt-1 text-xs font-medium text-emerald-600">{v.distance_km} km away</div>
+                <div className="mt-1 text-xs font-medium text-emerald-600">{t("discovery.venueDistance", { km: v.distance_km })}</div>
               </div></Popup>
             </Marker>
           ))}
@@ -289,12 +293,13 @@ export default function GeoSearchMap({
 
         {venues.length > 0 && (
           <div className="absolute right-3 top-3 z-[1000] rounded-lg bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 shadow dark:bg-slate-800/90 dark:text-slate-200">
-            {loading ? "Loading…" : `${venues.length} venues in radius`}
+            {loading ? t("discovery.loadingDots") : `${venues.length} ${t("discovery.venuesInRadius")}`}
           </div>
         )}
         {geoEnabled && (
           <div className="absolute left-3 top-3 z-[1000] rounded-lg bg-indigo-600/90 px-3 py-1.5 text-xs font-medium text-white shadow">
-            🔁 Auto-search active
+            <Icon name="refresh" className="mr-1 inline h-3 w-3 align-[-1px]" />
+            {t("discovery.autoSearchActive")}
           </div>
         )}
       </div>
@@ -304,7 +309,7 @@ export default function GeoSearchMap({
         <div className="rounded-xl border border-slate-200 dark:border-slate-800">
           <div className="border-b border-slate-100 px-4 py-2.5 dark:border-slate-800">
             <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Venues in radius ({venues.length})
+              {t("discovery.venuesTitle", { count: venues.length })}
             </span>
           </div>
           <div className="max-h-48 divide-y divide-slate-100 overflow-auto dark:divide-slate-800">
@@ -315,14 +320,14 @@ export default function GeoSearchMap({
                   <div className="truncate text-sm font-medium text-slate-700 dark:text-slate-200">{v.title}</div>
                   {v.address && <div className="truncate text-xs text-slate-400">{v.address}</div>}
                 </div>
-                <span className="text-xs text-slate-400">km</span>
+                <span className="text-xs text-slate-400">{t("discovery.kmShort")}</span>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {!pin && <p className="text-xs text-slate-400 text-center">Click on the map or search for an address to set the search center</p>}
+      {!pin && <p className="text-center text-xs text-slate-400">{t("discovery.clickToSetCenter")}</p>}
     </div>
   );
 }

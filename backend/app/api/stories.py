@@ -82,59 +82,49 @@ def list_stories(
         datetime(1970, 1, 1, tzinfo=timezone.utc),
     )
 
-    stories = (
+    stories_with_views = (
         q_with_views
+        .add_columns(
+            views_sub.c.last_viewed_at,
+            func.coalesce(views_sub.c.view_count, 0),
+        )
         .order_by(view_indicator.desc(), sort_time.desc())
         .offset(offset)
         .limit(limit)
         .all()
     )
 
-    # Batch-load views for the returned stories only (small set).
+    # Unpack ORM object + joined aggregate columns (no extra query needed).
+    stories = [sv[0] for sv in stories_with_views]
     EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    story_keys = [(s.account_id, s.peer_id, s.telegram_story_id) for s in stories]
     views_map: dict[tuple[int, int, int], tuple[datetime, int]] = {}
-    if story_keys:
-        from sqlalchemy import tuple_
-        for sv in (
-            db.query(StoryView)
-            .filter(tuple_(StoryView.account_id, StoryView.peer_id, StoryView.telegram_story_id).in_(story_keys))
+    for s, last, cnt in stories_with_views:
+        views_map[(s.account_id, s.peer_id, s.telegram_story_id)] = (last, cnt)
+
+    # Batch-load likes for returned stories — query by account_id + event_type
+    # (both indexed) and parse meta_json in Python, replacing the old LIKE-on-
+    # JSON scan that could not use any index.
+    liked: dict[tuple[int, int], str] = {}
+    story_account_ids = list({s.account_id for s in stories})
+    if story_account_ids:
+        for a in (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.event_type == "story_liked",
+                ActivityLog.account_id.in_(story_account_ids),
+            )
+            .order_by(ActivityLog.created_at.desc())
+            .limit(5000)
             .all()
         ):
-            k = (sv.account_id, sv.peer_id, sv.telegram_story_id)
-            last, cnt = views_map.get(k, (None, 0))
-            if last is None or sv.viewed_at > last:
-                last = sv.viewed_at
-            views_map[k] = (last, cnt + 1)
-
-    # Batch-load likes for returned stories.
-    liked: dict[tuple[int, int], str] = {}
-    if story_keys:
-        peer_ids = list({k[1] for k in story_keys})
-        # Use a targeted query: find activity logs whose meta_json contains
-        # any of the peer_ids in our result set.  Since meta_json is a TEXT
-        # column, we do a LIKE search for each peer_id (fast with an index).
-        from sqlalchemy import or_
-        like_filters = []
-        for pid in peer_ids[:100]:  # cap to avoid overly large IN clause
-            like_filters.append(ActivityLog.meta_json.like(f'%"peer_id": {pid}%'))
-        if like_filters:
-            logs = (
-                db.query(ActivityLog)
-                .filter(ActivityLog.event_type == "story_liked", or_(*like_filters))
-                .order_by(ActivityLog.created_at.desc())
-                .limit(2000)
-                .all()
-            )
-            for a in logs:
-                try:
-                    meta = json.loads(a.meta_json) if a.meta_json else {}
-                except (ValueError, TypeError):
-                    continue
-                pid = meta.get("peer_id")
-                sid = meta.get("story_id")
-                if pid is not None and sid is not None:
-                    liked.setdefault((int(pid), int(sid)), meta.get("emoji") or "👍")
+            try:
+                meta = json.loads(a.meta_json) if a.meta_json else {}
+            except (ValueError, TypeError):
+                continue
+            pid = meta.get("peer_id")
+            sid = meta.get("story_id")
+            if pid is not None and sid is not None:
+                liked.setdefault((int(pid), int(sid)), meta.get("emoji") or "👍")
 
     out = []
     for s in stories:
@@ -205,7 +195,7 @@ def skip_story(story_id: int, db: Db, user_id: Annotated[int, Depends(current_us
     if s is None:
         raise HTTPException(status_code=404, detail="story not found")
     item = db.query(StoryQueue).filter_by(account_id=s.account_id, story_id=s.id).first()
-    if item is not None:
+    if item is not None and item.status not in ("VIEWED", "FAILED", "EXPIRED", "SKIPPED"):
         item.status = "SKIPPED"
         if item.completed_at is None:
             item.completed_at = datetime.now(timezone.utc)

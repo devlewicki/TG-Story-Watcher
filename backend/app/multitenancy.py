@@ -19,8 +19,49 @@ def user_id_from_token(token: str | None) -> int | None:
         if not token or not token.startswith("user."): return None
         _, payload, signature = token.split(".", 2); expected = hmac.new(get_settings().secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()
         data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        return int(data["user_id"]) if hmac.compare_digest(signature, expected) and int(data["exp"]) > time.time() else None
+        if not hmac.compare_digest(signature, expected): return None
+        if int(data["exp"]) <= time.time(): return None
+        uid = int(data["user_id"])
+        # Check per-user token revocation (written via revoke_user_tokens).
+        try:
+            from .db import SessionLocal
+            from .models import SettingsStore as _SS
+            _db = SessionLocal()
+            try:
+                _row = _db.query(_SS.value).filter_by(key=f"user:{uid}:token_revoked_at").first()
+                if _row is not None and int(data["exp"]) <= int(_row.value):
+                    return None
+            finally:
+                _db.close()
+        except Exception:
+            pass  # best-effort: if DB unavailable, allow the token through
+        return uid
     except (ValueError, KeyError, TypeError, json.JSONDecodeError): return None
+
+
+def revoke_user_tokens(user_id: int) -> None:
+    """Record the current time as the revocation point for this user.
+
+    Callers should persist this via SettingsStore and/or rotate
+    ``secret_key`` to invalidate existing tokens.
+    """
+    from .db import SessionLocal
+    from .models import SettingsStore as _SS
+    import json as _json
+    db = SessionLocal()
+    try:
+        key = f"user:{user_id}:token_revoked_at"
+        row = db.query(_SS).filter_by(key=key).first()
+        now_str = str(int(time.time()))
+        if row is None:
+            db.add(_SS(key=key, value=now_str))
+        else:
+            row.value = now_str
+        db.commit()
+    finally:
+        db.close()
+
+
 def require_user(x_api_token: str | None = Header(default=None)) -> int:
     user_id = user_id_from_token(x_api_token)
     if user_id is None: raise HTTPException(401, "Требуется вход пользователя")

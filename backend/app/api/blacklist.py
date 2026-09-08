@@ -4,7 +4,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel as _BM
+from pydantic import BaseModel as _BM, model_validator
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -24,6 +24,12 @@ class ListIn(_BM):
     peer_id: int | None = None
     username: str | None = None
     comment: str | None = None
+
+    @model_validator(mode="after")
+    def _require_target(self):
+        if self.peer_id is None and (not self.username or not self.username.strip()):
+            raise ValueError("either peer_id or username is required")
+        return self
 
 
 @router.get("", response_model=list[ListOut])

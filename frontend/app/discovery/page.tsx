@@ -4,25 +4,27 @@ import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { api, type ActivityEvent } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
-import { Button, Card, CardHeader, ErrorBanner, Spinner, Switch } from "@/components/ui";
+import { Button, Card, CardHeader, ErrorBanner, Icon, PageHeader, PageLoading, Switch } from "@/components/ui";
+import type { IconName } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
+
+function MapFallback() {
+  const { t } = useTranslation();
+  return (
+    <div className="flex h-[420px] items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400 dark:border-slate-800 dark:bg-slate-900">
+      {t("discovery.mapLoading")}
+    </div>
+  );
+}
 
 const PlacesMap = dynamic(() => import("@/components/PlacesMap"), {
   ssr: false,
-  loading: () => (
-    <div className="flex h-[420px] items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400 dark:border-slate-800 dark:bg-slate-900">
-      Loading map…
-    </div>
-  ),
+  loading: () => <MapFallback />,
 });
 
 const GeoSearchMap = dynamic(() => import("@/components/GeoSearchMap"), {
   ssr: false,
-  loading: () => (
-    <div className="flex h-[420px] items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-400 dark:border-slate-800 dark:bg-slate-900">
-      Loading map…
-    </div>
-  ),
+  loading: () => <MapFallback />,
 });
 
 /* ------------------------------------------------------------------ */
@@ -138,7 +140,7 @@ export default function DiscoveryPage() {
   }, [cfg?.geo_search_enabled, cfg?.geo_search_lat, cfg?.geo_search_lng, cfg?.geo_search_radius_km]);
 
   if (error && !cfg) return <ErrorBanner message={error} />;
-  if (!cfg) return <Spinner />;
+  if (!cfg) return <PageLoading />;
 
   /* ---- Config update helpers ---- */
 
@@ -245,14 +247,14 @@ export default function DiscoveryPage() {
     } catch (e) { setError((e as Error).message); }
   };
 
-  const locationLabel = (line: string): { label: string; icon: string } => {
+  const locationLabel = (line: string): { label: string; icon: IconName } => {
     const vid = venueIdOf(line);
     if (vid) {
       const p = places.find((x) => x.venue_id === vid);
-      return p ? { label: p.title, icon: "📍" } : { label: `place (${vid.slice(0, 8)}…)`, icon: "📍" };
+      return p ? { label: p.title, icon: "mapPin" } : { label: `place (${vid.slice(0, 8)}…)`, icon: "mapPin" };
     }
-    if (line.startsWith("city:")) return { label: line.slice(5), icon: "🏙" };
-    return { label: line, icon: "📍" };
+    if (line.startsWith("city:")) return { label: line.slice(5), icon: "map" };
+    return { label: line, icon: "mapPin" };
   };
 
   const filteredPlaces = places.filter((p) => {
@@ -282,62 +284,62 @@ export default function DiscoveryPage() {
     saveState === "dirty" ? t("common.unsaved") :
     t("common.saved");
 
-  const activeModes = [
-    cfg.hashtags_enabled && cfg.hashtags.length > 0 ? `#${cfg.hashtags.length} tags` : null,
-    (cfg.auto_add_places || cfg.locations.length > 0) ? `${cfg.locations.length || "auto"} places` : null,
-    cfg.geo_search_enabled ? `${cfg.geo_search_radius_km}km radius` : null,
-  ].filter(Boolean);
-
   return (
     <div className="space-y-5">
       {/* ---- Header + Search button ---- */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{t("discovery.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+      <PageHeader
+        title={t("discovery.title")}
+        subtitle={
+          <>
             {t("discovery.subtitle")}
-          </p>
-          {lastRun && (
-            <p className="mt-1 text-xs text-slate-400">
-              {t("discovery.lastSearch")}: {timeAgo(lastRun.created_at)} · {lastRun.message}
-            </p>
-          )}
-          {activeModes.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {cfg.hashtags_enabled && cfg.hashtags.length > 0 && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-400">
-                  🏷 {cfg.hashtags.length} {t("discovery.hashtags").toLowerCase()}
-                </span>
-              )}
-              {(cfg.auto_add_places || cfg.locations.length > 0) && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400">
-                  📍 {cfg.locations.length || "auto"} {t("discovery.placesAndCities").toLowerCase()}
-                </span>
-              )}
-              {cfg.geo_search_enabled && cfg.geo_search_lat != null && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400">
-                  🌍 {cfg.geo_search_radius_km} km
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-3">
-          <span
-            className={`text-xs ${
-              saveState === "dirty" ? "text-amber-500" :
-              saveState === "saving" ? "text-slate-400" :
-              "text-emerald-600 dark:text-emerald-400"
-            }`}
-          >
-            {saveState === "dirty" ? "• " : saveState === "saved" ? "✓ " : ""}
-            {saveLabel}
-          </span>
-          <Button onClick={search} disabled={busy}>
-            {busy ? t("discovery.searching") : t("discovery.search")}
-          </Button>
-        </div>
-      </div>
+            {lastRun && (
+              <span className="mt-1 block text-xs text-slate-400">
+                {t("discovery.lastSearch")}: {timeAgo(lastRun.created_at)} · {lastRun.message}
+              </span>
+            )}
+            {((cfg.hashtags_enabled && cfg.hashtags.length > 0) || (cfg.auto_add_places || cfg.locations.length > 0) || (cfg.geo_search_enabled && cfg.geo_search_lat != null)) && (
+              <span className="mt-2 flex flex-wrap gap-1.5">
+                {cfg.hashtags_enabled && cfg.hashtags.length > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-400">
+                    <Icon name="tag" className="h-3 w-3" />
+                    {cfg.hashtags.length} {t("discovery.hashtags").toLowerCase()}
+                  </span>
+                )}
+                {(cfg.auto_add_places || cfg.locations.length > 0) && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400">
+                    <Icon name="mapPin" className="h-3 w-3" />
+                    {cfg.locations.length || "auto"} {t("discovery.placesAndCities").toLowerCase()}
+                  </span>
+                )}
+                {cfg.geo_search_enabled && cfg.geo_search_lat != null && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400">
+                    <Icon name="globe" className="h-3 w-3" />
+                    {cfg.geo_search_radius_km} {t("discovery.kmShort")}
+                  </span>
+                )}
+              </span>
+            )}
+          </>
+        }
+        right={
+          <div className="flex shrink-0 items-center gap-3">
+            <span
+              className={`text-xs ${
+                saveState === "dirty" ? "text-amber-500" :
+                saveState === "saving" ? "text-slate-400" :
+                "text-emerald-600 dark:text-emerald-400"
+              }`}
+            >
+              {saveState === "dirty" ? "• " : saveState === "saved" ? "✓ " : ""}
+              {saveLabel}
+            </span>
+            <Button onClick={search} disabled={busy}>
+              <Icon name="search" className="h-4 w-4" />
+              {busy ? t("discovery.searching") : t("discovery.search")}
+            </Button>
+          </div>
+        }
+      />
 
       {error && <ErrorBanner message={error} />}
       {note && <p className="text-sm text-emerald-600 dark:text-emerald-400">{note}</p>}
@@ -357,9 +359,6 @@ export default function DiscoveryPage() {
             </div>
             <Switch checked={cfg.enabled} onChange={(v) => update({ enabled: v })} />
           </div>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            {t("discovery.autoSearchDesc")}
-          </p>
         </div>
       </Card>
 
@@ -396,8 +395,9 @@ export default function DiscoveryPage() {
                         {cfg.hashtags.map((tg) => (
                           <span key={tg} className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-200">
                             #{tg}
-                            <button onClick={() => removeTag(tg)} className="text-slate-400 transition-colors hover:text-red-500">
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                            <button onClick={() => removeTag(tg)} title={t("common.remove")}
+                              className="text-slate-400 transition-colors hover:text-red-500">
+                              <Icon name="close" className="h-3.5 w-3.5" />
                             </button>
                           </span>
                         ))}
@@ -411,7 +411,7 @@ export default function DiscoveryPage() {
                   {overflows && (
                     <button onClick={() => setTagsExpanded(!tagsExpanded)}
                       className="text-xs font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
-                      {tagsExpanded ? t("discovery.collapse") : `Show all (${cfg.hashtags.length})`}
+                      {tagsExpanded ? t("discovery.collapse") : t("discovery.showAllTags", { count: cfg.hashtags.length })}
                     </button>
                   )}
                 </>
@@ -421,7 +421,7 @@ export default function DiscoveryPage() {
               <input value={tagInput} onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addTag()}
                 placeholder={t("discovery.tagPlaceholder")}
-                className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
+                className="flex-1 sw-input" />
               <Button variant="secondary" onClick={addTag}>{t("discovery.addTag")}</Button>
             </div>
             <p className="text-xs text-slate-400">{t("discovery.tagHint")}</p>
@@ -450,13 +450,13 @@ export default function DiscoveryPage() {
               <button onClick={() => setMapOpen(!mapOpen)}
                 className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800/50">
                 <span className="flex items-center gap-2">
-                  🗺 {t("discovery.mapTitle")}
+                  <Icon name="map" className="h-4 w-4 text-slate-400" />
+                  {t("discovery.mapTitle")}
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">{places.length}</span>
                 </span>
                 <span className="flex items-center gap-1 text-xs font-normal text-slate-400">
                   {mapOpen ? t("discovery.collapse") : t("discovery.expand")}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                    className={`h-4 w-4 transition-transform ${mapOpen ? "rotate-180" : ""}`}><path d="m6 9 6 6 6-6" /></svg>
+                  <Icon name="chevron" className={`h-4 w-4 transition-transform ${mapOpen ? "rotate-180" : ""}`} />
                 </span>
               </button>
               {mapOpen && (
@@ -494,8 +494,8 @@ export default function DiscoveryPage() {
                 <div className="rounded-xl border border-slate-200 dark:border-slate-800">
                   <button onClick={() => setSelectedOpen(!selectedOpen)}
                     className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-sm dark:bg-emerald-500/10">
-                      {selectedOpen ? "✕" : "📍"}
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400">
+                      {selectedOpen ? <Icon name="close" className="h-4 w-4" /> : <Icon name="mapPin" className="h-4 w-4" />}
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -506,8 +506,7 @@ export default function DiscoveryPage() {
                         {cfg.locations.length > 3 ? "…" : ""}
                       </span>
                     </span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                      className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${selectedOpen ? "rotate-180" : ""}`}><path d="m6 9 6 6 6-6" /></svg>
+                    <Icon name="chevron" className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${selectedOpen ? "rotate-180" : ""}`} />
                   </button>
                   {selectedOpen && (
                     <div className="max-h-56 space-y-0.5 overflow-auto border-t border-slate-200 p-2 dark:border-slate-800">
@@ -515,11 +514,11 @@ export default function DiscoveryPage() {
                         const { label, icon } = locationLabel(line);
                         return (
                           <div key={line} className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-100 dark:hover:bg-slate-800">
-                            <span className="text-sm">{icon}</span>
+                            <Icon name={icon} className="h-4 w-4 shrink-0 text-slate-400" />
                             <span className="min-w-0 flex-1 truncate text-sm">{label}</span>
-                            <button onClick={() => removeLocation(line)}
+                            <button onClick={() => removeLocation(line)} title={t("common.remove")}
                               className="text-slate-300 transition-colors hover:text-red-500 dark:text-slate-600">
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-4 w-4"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                              <Icon name="close" className="h-4 w-4" />
                             </button>
                           </div>
                         );
@@ -536,7 +535,7 @@ export default function DiscoveryPage() {
                 onFocus={() => suggestions.length > 0 && setShowSugg(true)}
                 onBlur={() => setTimeout(() => setShowSugg(false), 150)}
                 placeholder={t("discovery.addPlaceOrCity")}
-                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" />
+                className="w-full sw-input" />
               {showSugg && suggestions.length > 0 && (
                 <div className="absolute z-10 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800">
                   {suggestions.map((s, i) => (
@@ -564,23 +563,22 @@ export default function DiscoveryPage() {
                 </span>
                 <span className="flex items-center gap-2">
                   <span className="hidden text-xs font-normal text-slate-400 sm:inline">{t("discovery.fromStories")}</span>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                    className={`h-4 w-4 text-slate-400 transition-transform ${placesOpen ? "rotate-180" : ""}`}><path d="m6 9 6 6 6-6" /></svg>
+                  <Icon name="chevron" className={`h-4 w-4 text-slate-400 transition-transform ${placesOpen ? "rotate-180" : ""}`} />
                 </span>
               </div>
               {placesOpen && (
                 <div className="space-y-2 border-t border-slate-200 p-3 dark:border-slate-800">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex gap-3 text-xs">
-                      <button onClick={selectAll} className="font-medium text-emerald-600 hover:underline dark:text-emerald-400">Select all</button>
-                      <button onClick={deselectAll} className="font-medium text-slate-500 hover:underline dark:text-slate-400">Deselect all</button>
+                      <button onClick={selectAll} className="font-medium text-emerald-600 hover:underline dark:text-emerald-400">{t("discovery.selectAll")}</button>
+                      <button onClick={deselectAll} className="font-medium text-slate-500 hover:underline dark:text-slate-400">{t("discovery.deselectAll")}</button>
                     </div>
                     <input value={placeFilter} onChange={(e) => setPlaceFilter(e.target.value)}
-                      placeholder="Search place…"
-                      className="w-40 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-800" />
+                      placeholder={t("discovery.searchPlace")}
+                      className="w-40 sw-input !py-1 text-xs" />
                   </div>
                   {places.length === 0 ? (
-                    <p className="px-2 py-3 text-center text-xs text-slate-400">Places will appear automatically when geo-tags are found in discovered stories</p>
+                    <p className="px-2 py-3 text-center text-xs text-slate-400">{t("discovery.emptyPlaces")}</p>
                   ) : (
                     <div className="max-h-56 space-y-0.5 overflow-auto">
                       {filteredPlaces.map((p) => {
@@ -592,16 +590,14 @@ export default function DiscoveryPage() {
                               <span className="block truncate text-sm">{p.title}</span>
                               {p.address && <span className="block truncate text-xs text-slate-400">{p.address}</span>}
                             </span>
-                            <button onClick={(e) => { e.preventDefault(); deletePlace(p); }}
+                            <button onClick={(e) => { e.preventDefault(); deletePlace(p); }} title={t("common.delete")}
                               className="text-slate-300 transition-colors hover:text-red-500 dark:text-slate-600">
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-                                <path d="M3 6h18M8 6V4h8v2m1 0-1 14H8L7 6" />
-                              </svg>
+                              <Icon name="trash" className="h-4 w-4" />
                             </button>
                           </label>
                         );
                       })}
-                      {filteredPlaces.length === 0 && <p className="px-2 py-3 text-center text-xs text-slate-400">Nothing found</p>}
+                      {filteredPlaces.length === 0 && <p className="px-2 py-3 text-center text-xs text-slate-400">{t("discovery.nothingFound")}</p>}
                     </div>
                   )}
                 </div>
@@ -610,8 +606,8 @@ export default function DiscoveryPage() {
 
             <p className="text-xs text-slate-400">
               {cfg.auto_add_places
-                ? "Places are collected from discovered stories and searched automatically."
-                : "Places are collected from discovered stories — check the ones you want and they'll be added to \"Searching now\"."}
+                ? t("discovery.placesNoteAuto")
+                : t("discovery.placesNoteManual")}
             </p>
           </div>
         </Card>
@@ -634,9 +630,10 @@ export default function DiscoveryPage() {
             </div>
 
             {/* Status summary */}
-            {cfg.geo_search_enabled && cfg.geo_search_lat != null && (
-              <div className="rounded-lg bg-indigo-50/50 px-3 py-2 text-xs text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400">
-                📍 {cfg.geo_search_lat.toFixed(4)}, {cfg.geo_search_lng!.toFixed(4)} · {cfg.geo_search_radius_km} km radius
+            {cfg.geo_search_enabled && cfg.geo_search_lat != null && cfg.geo_search_lng != null && (
+              <div className="flex items-center gap-2 rounded-lg bg-indigo-50/50 px-3 py-2 text-xs text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400">
+                <Icon name="mapPin" className="h-3.5 w-3.5" />
+                {cfg.geo_search_lat.toFixed(4)}, {cfg.geo_search_lng.toFixed(4)} · {cfg.geo_search_radius_km} {t("discovery.kmShort")}
               </div>
             )}
 
@@ -645,12 +642,12 @@ export default function DiscoveryPage() {
               <button onClick={() => setGeoMapOpen(!geoMapOpen)}
                 className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800/50">
                 <span className="flex items-center gap-2">
-                  🌍 {t("discovery.geoMapTitle")}
+                  <Icon name="globe" className="h-4 w-4 text-slate-400" />
+                  {t("discovery.geoMapTitle")}
                 </span>
                 <span className="flex items-center gap-1 text-xs font-normal text-slate-400">
                   {geoMapOpen ? t("discovery.collapse") : t("discovery.expand")}
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                    className={`h-4 w-4 transition-transform ${geoMapOpen ? "rotate-180" : ""}`}><path d="m6 9 6 6 6-6" /></svg>
+                  <Icon name="chevron" className={`h-4 w-4 transition-transform ${geoMapOpen ? "rotate-180" : ""}`} />
                 </span>
               </button>
               {geoMapOpen && (
@@ -666,7 +663,7 @@ export default function DiscoveryPage() {
                       geo_search_radius_km: radiusKm,
                     })}
                     onSearchComplete={(res) => {
-                      setNote(`Geo search: ${res.venues_added} new venues added to search`);
+                      setNote(t("discovery.geoSearchDone", { count: res.venues_added }));
                       loadPlaces();
                       loadLastRun();
                     }}
@@ -691,11 +688,13 @@ export default function DiscoveryPage() {
                 ? "border-blue-200 bg-blue-50/50 dark:border-blue-500/20 dark:bg-blue-500/5"
                 : "border-slate-200 bg-slate-50/50 dark:border-slate-700 dark:bg-slate-800/30"
             }`}>
-              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg ${
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
                 cfg.hashtags_enabled && cfg.hashtags.length > 0
-                  ? "bg-blue-100 dark:bg-blue-500/20"
-                  : "bg-slate-100 dark:bg-slate-700"
-              }`}>🏷</div>
+                  ? "bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
+                  : "bg-slate-100 text-slate-400 dark:bg-slate-700 dark:text-slate-500"
+              }`}>
+                <Icon name="tag" className="h-5 w-5" />
+              </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -706,12 +705,14 @@ export default function DiscoveryPage() {
                       ? "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400"
                       : "bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400"
                   }`}>
-                    {cfg.hashtags_enabled ? (cfg.hashtags.length > 0 ? "ON" : "ON (empty)") : "OFF"}
+                    {cfg.hashtags_enabled
+                      ? (cfg.hashtags.length > 0 ? t("discovery.onShort") : t("discovery.onEmpty"))
+                      : t("discovery.offShort")}
                   </span>
                 </div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">
                   {cfg.hashtags_enabled
-                    ? `${cfg.hashtags.length} tags configured`
+                    ? t("discovery.tagsConfigured", { count: cfg.hashtags.length })
                     : t("discovery.disabled")}
                 </div>
               </div>
@@ -723,11 +724,13 @@ export default function DiscoveryPage() {
                 ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-500/20 dark:bg-emerald-500/5"
                 : "border-slate-200 bg-slate-50/50 dark:border-slate-700 dark:bg-slate-800/30"
             }`}>
-              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg ${
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
                 (cfg.auto_add_places || cfg.locations.length > 0)
-                  ? "bg-emerald-100 dark:bg-emerald-500/20"
-                  : "bg-slate-100 dark:bg-slate-700"
-              }`}>📍</div>
+                  ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400"
+                  : "bg-slate-100 text-slate-400 dark:bg-slate-700 dark:text-slate-500"
+              }`}>
+                <Icon name="mapPin" className="h-5 w-5" />
+              </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -738,14 +741,14 @@ export default function DiscoveryPage() {
                       ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400"
                       : "bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400"
                   }`}>
-                    {(cfg.auto_add_places || cfg.locations.length > 0) ? "ON" : "OFF"}
+                    {(cfg.auto_add_places || cfg.locations.length > 0) ? t("discovery.onShort") : t("discovery.offShort")}
                   </span>
                 </div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">
                   {cfg.auto_add_places && cfg.locations.length === 0
-                    ? `${places.length} collected (auto)`
+                    ? t("discovery.placesCollectedAuto", { collected: places.length })
                     : cfg.locations.length > 0
-                    ? `${cfg.locations.length} selected of ${places.length} collected`
+                    ? t("discovery.placesSelectedOf", { selected: cfg.locations.length, collected: places.length })
                     : t("discovery.disabled")}
                 </div>
               </div>
@@ -757,11 +760,13 @@ export default function DiscoveryPage() {
                 ? "border-indigo-200 bg-indigo-50/50 dark:border-indigo-500/20 dark:bg-indigo-500/5"
                 : "border-slate-200 bg-slate-50/50 dark:border-slate-700 dark:bg-slate-800/30"
             }`}>
-              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg ${
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
                 cfg.geo_search_enabled && cfg.geo_search_lat != null
-                  ? "bg-indigo-100 dark:bg-indigo-500/20"
-                  : "bg-slate-100 dark:bg-slate-700"
-              }`}>🌍</div>
+                  ? "bg-indigo-100 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400"
+                  : "bg-slate-100 text-slate-400 dark:bg-slate-700 dark:text-slate-500"
+              }`}>
+                <Icon name="globe" className="h-5 w-5" />
+              </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
@@ -772,12 +777,12 @@ export default function DiscoveryPage() {
                       ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-400"
                       : "bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400"
                   }`}>
-                    {cfg.geo_search_enabled && cfg.geo_search_lat != null ? "ON" : "OFF"}
+                    {cfg.geo_search_enabled && cfg.geo_search_lat != null ? t("discovery.onShort") : t("discovery.offShort")}
                   </span>
                 </div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">
                   {cfg.geo_search_enabled && cfg.geo_search_lat != null
-                    ? `${cfg.geo_search_radius_km} km · ${geoVenueCount} venues`
+                    ? t("discovery.geoSummary", { km: cfg.geo_search_radius_km, count: geoVenueCount })
                     : t("discovery.disabled")}
                 </div>
               </div>

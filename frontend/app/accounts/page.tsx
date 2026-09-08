@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api, type Account, clearToken } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { useTranslation } from "@/lib/i18n";
-import { Badge, Button, Card, CardHeader, Empty, ErrorBanner, Spinner } from "@/components/ui";
+import { Badge, Button, Card, Empty, ErrorBanner, Icon, IconButton, PageHeader, PageLoading } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
 
 type FlowStep = "phone" | "code" | "password";
@@ -17,23 +17,31 @@ export default function AccountsPage() {
 
   const [showModal, setShowModal] = useState(false);
 
-  if (loading) return <Spinner />;
+  if (loading) return <PageLoading />;
   if (error) return <ErrorBanner message={error} />;
   const accounts = data ?? [];
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{t("accounts.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">{t("accounts.subtitle")}</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={refresh}>{t("common.refresh")}</Button>
-          <Button onClick={() => setShowModal(true)}>{t("common.add")}</Button>
-          <Button variant="danger" onClick={() => { clearToken(); window.dispatchEvent(new Event("storywatcher:unauthorized")); }}>{t("common.logout")}</Button>
-        </div>
-      </div>
+      <PageHeader
+        title={t("accounts.title")}
+        subtitle={t("accounts.subtitle")}
+        right={
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={refresh}>
+              <Icon name="refresh" className="h-4 w-4" />
+              {t("common.refresh")}
+            </Button>
+            <Button onClick={() => setShowModal(true)}>
+              <Icon name="send" className="h-4 w-4" />
+              {t("common.add")}
+            </Button>
+            <Button variant="danger" onClick={() => { clearToken(); window.dispatchEvent(new Event("storywatcher:unauthorized")); }}>
+              {t("common.logout")}
+            </Button>
+          </div>
+        }
+      />
 
       {accounts.length === 0 ? (
         <Card><Empty label={t("accounts.noAccounts")} /></Card>
@@ -189,11 +197,13 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
   };
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/50 p-4">
-      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">{t("accounts.connectTitle")}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
+          <IconButton label={t("common.cancel")} onClick={onClose}>
+            <Icon name="close" className="h-4 w-4" />
+          </IconButton>
         </div>
 
         <div className="mt-4 flex items-center gap-1 text-xs text-slate-400">
@@ -213,7 +223,7 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               placeholder={t("accounts.phonePlaceholder")}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              className="mt-1 w-full sw-input"
               autoFocus
             />
           </div>
@@ -229,7 +239,7 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
               value={code}
               onChange={(e) => setCode(e.target.value)}
               placeholder={t("accounts.codePlaceholder")}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              className="mt-1 w-full sw-input"
               autoFocus
             />
           </div>
@@ -245,7 +255,7 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={t("accounts.passwordPlaceholder")}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              className="mt-1 w-full sw-input"
               autoFocus
             />
           </div>

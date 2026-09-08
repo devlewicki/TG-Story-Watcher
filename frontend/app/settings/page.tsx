@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
-import { Card, CardHeader, ErrorBanner, Spinner, Switch } from "@/components/ui";
+import { Card, CardHeader, ErrorBanner, Icon, PageHeader, PageLoading, Spinner, Switch } from "@/components/ui";
+import type { IconName } from "@/components/ui";
 import { computeAllFromDaily } from "@/lib/compute_all_from_daily";
 
 type SettingsMap = Record<string, Record<string, unknown>>;
@@ -28,7 +29,7 @@ type FieldDef = {
 type SectionDef = {
   title: string;
   description: string;
-  icon: string;
+  icon: IconName;
   fields: Record<string, FieldDef>;
 };
 
@@ -42,7 +43,7 @@ function useSections(): Record<string, SectionDef> {
     general: {
       title: t("settings.sections.general.title"),
       description: t("settings.sections.general.description"),
-      icon: "⚙️",
+      icon: "sliders",
       fields: {
         language: {
           label: t("settings.sections.general.fields.language.label"),
@@ -80,7 +81,7 @@ function useSections(): Record<string, SectionDef> {
     telegram: {
       title: t("settings.sections.telegram.title"),
       description: t("settings.sections.telegram.description"),
-      icon: "✈️",
+      icon: "send",
       fields: {
         api_id: { label: t("settings.sections.telegram.fields.apiId.label"), type: "text", sensitive: true },
         api_hash: { label: t("settings.sections.telegram.fields.apiHash.label"), type: "text", sensitive: true },
@@ -94,7 +95,7 @@ function useSections(): Record<string, SectionDef> {
     monitoring: {
       title: t("settings.sections.monitoring.title"),
       description: t("settings.sections.monitoring.description"),
-      icon: "📡",
+      icon: "signal",
       fields: {
         realtime: {
           label: t("settings.sections.monitoring.fields.realtime.label"),
@@ -111,7 +112,7 @@ function useSections(): Record<string, SectionDef> {
     queue: {
       title: t("settings.sections.queue.title"),
       description: t("settings.sections.queue.description"),
-      icon: "🗂",
+      icon: "list",
       fields: {
         max_tasks: { label: t("settings.sections.queue.fields.maxTasks.label"), type: "number", min: 1, slider: { min: 50, max: 2000, step: 50 } },
         parallel: { label: t("settings.sections.queue.fields.parallel.label"), type: "number", min: 1, unit: t("settings.sections.queue.fields.parallel.unit"), slider: { min: 1, max: 10 } },
@@ -141,7 +142,7 @@ function useSections(): Record<string, SectionDef> {
     limits: {
       title: t("settings.sections.limits.title"),
       description: t("settings.sections.limits.description"),
-      icon: "🛡",
+      icon: "shield",
       fields: {
         views_per_minute: { label: t("settings.sections.limits.fields.viewsPerMinute.label"), type: "readonly" },
         views_per_hour: { label: t("settings.sections.limits.fields.viewsPerHour.label"), type: "readonly" },
@@ -151,7 +152,7 @@ function useSections(): Record<string, SectionDef> {
     view: {
       title: t("settings.sections.view.title"),
       description: t("settings.sections.view.description"),
-      icon: "❤️",
+      icon: "heart",
       fields: {
         max_stories_per_user_per_day: {
           label: t("settings.sections.view.fields.maxStoriesPerUserPerDay.label"),
@@ -175,7 +176,7 @@ function useSections(): Record<string, SectionDef> {
     filters: {
       title: t("settings.sections.filters.title"),
       description: t("settings.sections.filters.description"),
-      icon: "🎯",
+      icon: "funnel",
       fields: {
         include_contacts: { label: t("settings.sections.filters.fields.includeContacts.label"), type: "bool" },
         include_unknown: { label: t("settings.sections.filters.fields.includeUnknown.label"), type: "bool" },
@@ -191,15 +192,14 @@ function useSections(): Record<string, SectionDef> {
   };
 }
 
-const inputCls =
-  "mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 transition-colors focus:border-emerald-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
+const inputCls = "mt-1.5 w-full sw-input";
 
 export default function SettingsPage() {
   const { t } = useTranslation();
   const SECTIONS = useSections();
   const [all, setAll] = useState<SettingsMap | null>(null);
   const [error, setError] = useState("");
-  const [saveState, setSaveState] = useState<"saved" | "saving" | "dirty">(
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "dirty" | "error">(
     "saved"
   );
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -219,7 +219,7 @@ export default function SettingsPage() {
   }, []);
 
   if (error && !all) return <ErrorBanner message={error} />;
-  if (!all) return <Spinner />;
+  if (!all) return <PageLoading />;
 
   const setField = (section: string, key: string, value: unknown) => {
     const next = {
@@ -255,21 +255,17 @@ export default function SettingsPage() {
         setError("");
       } catch (e) {
         setError((e as Error).message);
-        setSaveState("saved");
+        setSaveState("error");
       }
     }, 600);
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{t("settings.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            {t("settings.subtitle")}
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title={t("settings.title")}
+        subtitle={t("settings.subtitle")}
+      />
 
       {error && <ErrorBanner message={error} />}
 
@@ -279,7 +275,9 @@ export default function SettingsPage() {
             <CardHeader
               title={
                 <span className="flex items-center gap-2">
-                  <span className="text-base">{section.icon}</span>
+                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                    <Icon name={section.icon} className="h-4 w-4" />
+                  </span>
                   {section.title}
                 </span>
               }
@@ -318,6 +316,11 @@ export default function SettingsPage() {
           <span className="flex items-center gap-1.5 text-sm text-amber-500">
             <span className="h-2 w-2 rounded-full bg-amber-500" />
             {t("common.saving")}
+          </span>
+        ) : saveState === "error" ? (
+          <span className="flex items-center gap-1.5 text-sm text-rose-500">
+            <span className="h-2 w-2 rounded-full bg-rose-500" />
+            {t("common.saveFailed")}
           </span>
         ) : (
           <span className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">

@@ -14,7 +14,7 @@ import {
 import { api, type DashboardData } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { useTranslation, useLocale } from "@/lib/i18n";
-import { Badge, Card, CardHeader, Empty, ErrorBanner, Spinner, StatCard } from "@/components/ui";
+import { Badge, Card, CardHeader, Empty, ErrorBanner, Icon, PageHeader, PageLoading, StatCard, Button } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
 
 const AXIS_TICK = { fontSize: 11, fill: "#94a3b8" };
@@ -36,7 +36,7 @@ export default function DashboardPage() {
     api.get<DashboardData>("/dashboard", s)
   );
 
-  if (loading) return <Spinner />;
+  if (loading) return <PageLoading />;
   if (error) return <ErrorBanner message={error} />;
   if (!data) return <Empty label={t("dashboard.noData")} />;
 
@@ -52,20 +52,16 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{t("dashboard.title")}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            {t("dashboard.activeAccounts")}: {data.accounts.active} {t("dashboard.of")} {data.accounts.total}
-          </p>
-        </div>
-        <button
-          onClick={refresh}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-        >
-          {t("common.refresh")}
-        </button>
-      </div>
+      <PageHeader
+        title={t("dashboard.title")}
+        subtitle={`${t("dashboard.activeAccounts")}: ${data.accounts.active} ${t("dashboard.of")} ${data.accounts.total}`}
+        right={
+          <Button variant="secondary" onClick={refresh}>
+            <Icon name="refresh" className="h-4 w-4" />
+            {t("common.refresh")}
+          </Button>
+        }
+      />
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
         <StatCard label={t("dashboard.accounts")} value={cards.accounts} icon={<UserIcon />} accentKey="indigo" />
@@ -134,7 +130,7 @@ export default function DashboardPage() {
             <Empty label={t("dashboard.noActivity")} />
           ) : (
             data.recent.map((e) => (
-              <li key={e.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+              <li key={e.id} className="flex items-center gap-3 px-5 py-3 text-sm">
                 <Badge status={e.event_type === "story_viewed" ? "VIEWED" : e.level} />
                 <span className="flex-1 truncate text-slate-700 dark:text-slate-200">{e.message}</span>
                 <span className="text-xs text-slate-400">{timeAgo(e.created_at)}</span>

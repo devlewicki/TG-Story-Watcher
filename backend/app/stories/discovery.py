@@ -19,6 +19,7 @@ Arbitrary geo points (``MediaAreaGeoPoint``) are rejected with
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -90,7 +91,9 @@ async def search_hashtags(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            break
+            # Wait out the flood before trying the next hashtag so the rest of
+            # the list still gets searched this cycle.
+            await asyncio.sleep(min(e.seconds, 30))
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery #%s failed: %s", tag, exc)
             activity.log(
@@ -128,7 +131,7 @@ async def search_locations(
         if area is None:
             logger.info("discovery location '%s' not resolvable; skipped", loc)
             activity.log(
-                f"Discovery geo '{loc}': не удалось определить гео-метку",
+                f"Discovery geo '{loc}': could not resolve geo-tag",
                 event_type="discovery_error",
                 level="WARNING",
                 account_id=monitor.account.id,
@@ -156,7 +159,9 @@ async def search_locations(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            break
+            # Wait out the flood before trying the next location so the rest of
+            # the list still gets searched this cycle.
+            await asyncio.sleep(min(e.seconds, 30))
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery geo '%s' failed: %s", loc, exc)
             activity.log(
@@ -306,14 +311,28 @@ async def _search_posts(
         # (e.g. #спб has thousands of mostly-expired items) for minutes.
         if pages > 5:
             break
-        res = await client(
-            functions.stories.SearchPostsRequest(
-                offset=offset,
-                limit=limit,
-                hashtag=hashtag,
-                area=area,
+        try:
+            res = await client(
+                functions.stories.SearchPostsRequest(
+                    offset=offset,
+                    limit=limit,
+                    hashtag=hashtag,
+                    area=area,
+                )
             )
-        )
+        except errors.FloodWaitError:
+            # Propagate so the per-tag handler can wait it out and continue
+            # with the next hashtag/location instead of dropping them.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Transient API/transport error: stop this pagination loop but keep
+            # whatever was already processed. The next cycle retries the whole
+            # search.
+            logger.warning(
+                "search_posts failed (hashtag=%s area=%s): %s",
+                hashtag or "", bool(area), exc,
+            )
+            break
         stories = getattr(res, "stories", []) or []
         if not stories:
             break

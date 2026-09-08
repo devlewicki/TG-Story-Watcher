@@ -85,6 +85,10 @@ class StoryMonitor:
         self.account = account
         self.db = db
         self._skipped: set[tuple[int, int]] | None = None
+        # Per-cycle cache: (FilterEngine, FiltersLookup) reused across
+        # ingest_story calls within a single batch (fetch_available / discovery)
+        # to avoid re-reading settings and reloading whitelist/blacklist per story.
+        self._engine_cache: tuple[FilterEngine, FiltersLookup] | None = None
 
     # ---- filtering helpers ----
     def _load_sets(self):
@@ -106,6 +110,7 @@ class StoryMonitor:
                 ActivityLog.account_id == self.account.id,
                 ActivityLog.created_at >= since,
             )
+            .limit(5000)  # cap scan to avoid unbounded memory on heavy accounts
             .all()
         )
         out: set[tuple[int, int]] = set()
@@ -117,9 +122,14 @@ class StoryMonitor:
             pid, sid = meta.get("peer_id"), meta.get("story_id")
             if pid is not None and sid is not None:
                 out.add((int(pid), int(sid)))
+        if len(rows) >= 5000:
+            logger.warning("skipped_set scan hit 5000-row cap for account %s", self.account.id)
         return out
 
     def build_engine(self):
+        # Return cached engine if available (same batch cycle).
+        if self._engine_cache is not None:
+            return self._engine_cache
         s = SettingsService(self.db, self.account.user_id)
         # Reuse a lookup that already has contacts populated (set by the
         # scheduler before the burst sync); otherwise load a fresh one.
@@ -128,13 +138,22 @@ class StoryMonitor:
             fl = FiltersLookup.load(self.db, self.account.id, s)
             self._lookup = fl
         filters = s.get("filters")
-        return FilterEngine(
+        engine = FilterEngine(
             filters,
             fl.wl_peers,
             fl.bl_peers,
             fl.wl_users,
             fl.bl_users,
-        ), fl
+        )
+        self._engine_cache = (engine, fl)
+        return engine, fl
+
+    def invalidate_engine_cache(self) -> None:
+        """Drop the cached engine/lookup so the next build_engine call
+        re-reads settings and whitelist/blacklist.  Call this at the start
+        of a new batch cycle (e.g. before fetch_available).
+        """
+        self._engine_cache = None
 
     def author_info(self, peer_id: int, info: dict, fl) -> AuthorInfo:
         username = info.get("username")
@@ -329,7 +348,12 @@ class StoryMonitor:
             },
             db=self.db,
         )
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception as exc:
+            logger.warning("_enqueue commit failed (story %s): %s", story.id, exc)
+            self.db.rollback()
+            return False
         return True
 
     # ---- fetching available stories (burst fetch) ----
@@ -338,6 +362,7 @@ class StoryMonitor:
         processed = 0
         state = None
         first = True
+        self.invalidate_engine_cache()
         while True:
             try:
                 res = await self.client(
@@ -606,6 +631,25 @@ class FiltersLookup:
 # cycle — so cache it and only re-fetch when stale.
 _CONTACTS_TTL = 1800.0  # 30 minutes — GetContacts triggers FloodWait
 _contacts_cache: dict[int, tuple[float, set[int], set[int]]] = {}
+_MAX_CONTACTS_CACHE = 100  # max accounts cached before eviction
+
+
+def _evict_stale_contacts() -> None:
+    """Remove cache entries older than 2× TTL to prevent unbounded growth
+    when accounts are deleted or long-idle.
+    """
+    now = time.monotonic()
+    stale = [
+        aid for aid, (ts, _, _) in _contacts_cache.items()
+        if now - ts > _CONTACTS_TTL * 2
+    ]
+    for aid in stale:
+        del _contacts_cache[aid]
+    # If still over limit, evict oldest entries.
+    if len(_contacts_cache) > _MAX_CONTACTS_CACHE:
+        sorted_ids = sorted(_contacts_cache, key=lambda k: _contacts_cache[k][0])
+        for aid in sorted_ids[: len(sorted_ids) - _MAX_CONTACTS_CACHE]:
+            del _contacts_cache[aid]
 
 
 async def load_contacts_into(client, account: TelegramAccount, lookup: FiltersLookup) -> None:
@@ -615,6 +659,9 @@ async def load_contacts_into(client, account: TelegramAccount, lookup: FiltersLo
     with an empty contact set, which would treat every contact as "unknown"
     and bypass the filter.
     """
+    # Evict stale entries periodically (no-op if already clean).
+    _evict_stale_contacts()
+
     cached = _contacts_cache.get(account.id)
     now = time.monotonic()
     if cached is not None and now - cached[0] < _CONTACTS_TTL:

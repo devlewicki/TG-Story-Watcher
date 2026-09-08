@@ -36,6 +36,13 @@ class Settings(BaseSettings):
 
     api_token: OptStr = Field(default=None, validation_alias="STORYWATCHER_API_TOKEN")
 
+    # How often the worker runs full archive analytics collection per account
+    # (seconds). This is intentionally much larger than the sync interval:
+    # full-archive GetStoriesArchive + per-story views is heavy on Telegram RPCs.
+    analytics_interval: float = Field(
+        default=3600.0, validation_alias="STORYWATCHER_ANALYTICS_INTERVAL"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

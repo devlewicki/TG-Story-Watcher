@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import sqlite3 as _sqlite3
+import time
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -45,9 +46,11 @@ from ..models import AccountStatus
 
 logger = logging.getLogger("storywatcher.telegram")
 settings = get_settings()
+
 _clients: dict[int, TelegramClient] = {}
 _login_clients: dict[str, TelegramClient] = {}
 _login_states: dict[str, "LoginState"] = {}
+_login_started: dict[str, float] = {}
 
 
 @dataclass
@@ -243,12 +246,34 @@ async def start_account(account):
     return client
 
 
-def shutdown_all():
+async def shutdown_all():
+    """Disconnect all cached Telegram clients cleanly.
+
+    Must be awaited from within a running event loop (e.g. the FastAPI
+    lifespan shutdown or the worker's final cleanup).  Previously this
+    fire-and-forgot ``asyncio.create_task`` calls, so the clients were never
+    actually disconnected and Telethon's SQLite session files could be left in
+    an inconsistent (uncheckpointed WAL) state across restarts.
+    """
+    tasks = []
     for account_id in list(_clients):
-        try:
-            asyncio.create_task(release_client(account_id))
-        except RuntimeError:
-            pass
+        tasks.append(release_client(account_id))
+    for phone in list(_login_clients):
+        login = _login_clients.pop(phone, None)
+        _login_states.pop(phone, None)
+        _login_started.pop(phone, None)
+        if login is not None:
+            tasks.append(_release_login(login))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _clients.clear()
+
+
+async def _release_login(login_client):
+    try:
+        await login_client.disconnect()
+    except Exception:
+        logger.debug("Telegram login client disconnect failed", exc_info=True)
 
 
 def _login_api():
@@ -258,15 +283,40 @@ def _login_api():
 
 
 async def _ensure_login(phone: str):
+    # Evict stale login sessions first so abandoned send-code flows don't leak
+    # TelegramClient instances (each holds a live MTProto connection).
+    await _evict_stale_logins()
     client = _login_clients.get(phone)
     if client is None:
         api_id, api_hash = _login_api()
         client = TelegramClient(StringSession(), api_id, api_hash)
         _login_clients[phone] = client
         _login_states[phone] = LoginState()
+    _login_started[phone] = time.monotonic()
     if not client.is_connected():
         await client.connect()
     return client
+
+
+# In-memory TelegramClient used during the send-code/confirm flow.  If a user
+# abandons the login midway, an entry remains forever; the TTL below cleans
+# them up on the next login-related call.
+LOGIN_TTL = 600.0  # seconds; Telegram codes expire after ~2-3 min anyway
+
+
+async def _evict_stale_logins():
+    now = time.monotonic()
+    stale = [phone for phone, started in _login_started.items() if now - started > LOGIN_TTL]
+    for phone in stale:
+        login = _login_clients.pop(phone, None)
+        _login_states.pop(phone, None)
+        _login_started.pop(phone, None)
+        if login is not None:
+            logger.info("evicting stale login client for %s", phone)
+            try:
+                await login.disconnect()
+            except Exception:
+                logger.debug("stale login client disconnect failed", exc_info=True)
 
 
 async def auth_send_code(phone: str):
@@ -290,6 +340,7 @@ async def auth_send_code(phone: str):
             client = TelegramClient(StringSession(), api_id, api_hash)
             _login_clients[phone] = client
             _login_states[phone] = LoginState()
+            _login_started[phone] = time.monotonic()
             await asyncio.sleep(0.5)
             await client.connect()
     raise RuntimeError("Telegram authorization could not be restarted")
@@ -325,6 +376,7 @@ async def auth_confirm_password(phone: str, password: str):
 async def finish_login(phone: str, account):
     login = _login_clients.pop(phone, None)
     _login_states.pop(phone, None)
+    _login_started.pop(phone, None)
     if not login:
         raise ValueError("no active login session")
     try:
@@ -357,14 +409,36 @@ def _save_session_as_sqlite(client, target_path: str) -> None:
     """
     from telethon.sessions.sqlite import SQLiteSession as _SQLiteSession
 
-    # Remove any old file so SQLiteSession creates a fresh database.
+    # Disconnect any cached client that might hold the session file open,
+    # preventing corruption when we overwrite it.
+    account_id = None
+    for aid, c in list(_clients.items()):
+        if c is client:
+            account_id = aid
+            break
+    if account_id is not None:
+        old = _clients.pop(account_id, None)
+        if old:
+            try:
+                old.disconnect()
+            except Exception:
+                pass
+
+    # Write to a temporary file first, then atomically rename to avoid
+    # a race where the worker reads a half-written session.
+    #
+    # IMPORTANT: Telethon's SQLiteSession.__init__ appends ".session" if the
+    # filename doesn't already end with it.  We must use a tmp_path that
+    # already ends with ".session" so the actual on-disk path matches what
+    # we later pass to os.replace().
+    tmp_path = target_path.replace(".session", ".tmp_save.session")
     for suffix in ("", "-journal", "-wal", "-shm"):
         try:
-            os.remove(target_path + suffix)
+            os.remove(tmp_path + suffix)
         except FileNotFoundError:
             pass
 
-    sqlite_sess = _SQLiteSession(target_path)
+    sqlite_sess = _SQLiteSession(tmp_path)
     # Copy state from the live StringSession session.
     src = client.session
     sqlite_sess._dc_id = src._dc_id
@@ -387,5 +461,27 @@ def _save_session_as_sqlite(client, target_path: str) -> None:
     # effect on the DB until _update_session_table() writes them.
     sqlite_sess._update_session_table()
     sqlite_sess.save()
+    # Flush the WAL back into the main DB file and switch the tmp file to
+    # rollback journal mode so the atomic rename below moves a single
+    # self-contained file. Without this, the -wal/-shm sidecars would need
+    # separate non-atomic moves and a reader could pair the new main file
+    # with stale sidecar data (corrupted session on disk).
+    try:
+        conn = getattr(sqlite_sess, "_conn", None)
+        if conn is None:
+            raise RuntimeError("no sqlite connection")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("PRAGMA journal_mode=DELETE")
+    except Exception:
+        logger.warning("could not checkpoint session db before save", exc_info=True)
     sqlite_sess.close()
+
+    # Under journal_mode=DELETE the tmp file is fully self-contained, so the
+    # swap is a single atomic os.replace().
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        try:
+            os.remove(target_path + suffix)
+        except FileNotFoundError:
+            pass
+    os.replace(tmp_path, target_path)
     logger.info("Saved session as SQLite: %s", target_path)
