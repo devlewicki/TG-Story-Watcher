@@ -88,6 +88,10 @@ const ru = {
     passwordLabel: "Пароль двухфакторной аутентификации",
     passwordPlaceholder: "Пароль 2FA",
     phoneError: "Введите корректный номер телефона.",
+    reloginNeeded: "Требуется повторная авторизация",
+    reloginDesc: "Сессия Telegram устарела из-за смены IP-адреса. Введите код подтверждения для восстановления.",
+    reloginButton: "Восстановить сессию",
+    sendingCode: "Отправляем код…",
   },
 
   // Stories

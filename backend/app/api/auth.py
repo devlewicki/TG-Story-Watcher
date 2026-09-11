@@ -39,16 +39,57 @@ class AuthStatusOut(BaseModel):
 
 
 def _account_for_phone(db: Session, phone: str, user_id: int) -> TelegramAccount:
+    normalized = cm.normalize_phone(phone)
+    # Fast path: exact match on what the user typed.
     account = db.query(TelegramAccount).filter(TelegramAccount.phone == phone).first()
+    if account is None and normalized:
+        # Canonical match: the same number may already be stored in digit form
+        # (Telethon's User.phone). Without this, re-login after logout with a
+        # differently-formatted phone created a duplicate row and the unique
+        # phone index made the update collide.
+        account = (
+            db.query(TelegramAccount)
+            .filter(TelegramAccount.phone == normalized)
+            .first()
+        )
+    if account is None and normalized:
+        # Belt-and-braces: legacy rows may carry the '+' prefix (or other
+        # formatting). The table is tiny, so scanning for the canonical digits
+        # is cheap and prevents yet another duplicate row for the same number.
+        account = next(
+            (
+                a for a in db.query(TelegramAccount).all()
+                if cm.normalize_phone(a.phone) == normalized
+            ),
+            None,
+        )
     if account is not None:
         if account.user_id not in (None, user_id):
             raise HTTPException(status_code=403, detail="этот Telegram-аккаунт уже подключён к другому пользователю")
         account.user_id = user_id
         return account
-    account = TelegramAccount(phone=phone, user_id=user_id, status=AccountStatus.ACTIVE.value)
+    account = TelegramAccount(phone=normalized or phone, user_id=user_id, status=AccountStatus.ACTIVE.value)
     db.add(account)
     db.flush()
     return account
+
+
+def _find_duplicate(db: Session, account: TelegramAccount, normalized_phone: str) -> TelegramAccount | None:
+    """Another row owning the same canonical phone (any stored format)."""
+    exact = (
+        db.query(TelegramAccount)
+        .filter(
+            TelegramAccount.phone == normalized_phone,
+            TelegramAccount.id != account.id,
+        )
+        .first()
+    )
+    if exact is not None:
+        return exact
+    for candidate in db.query(TelegramAccount).filter(TelegramAccount.id != account.id).all():
+        if cm.normalize_phone(candidate.phone) == normalized_phone:
+            return candidate
+    return None
 
 
 async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
@@ -57,17 +98,11 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
     try:
         client = await cm.finish_login(phone, account)
         me = await client.get_me()
-        normalized_phone = getattr(me, "phone", None) if me else None
+        normalized_phone = cm.normalize_phone(getattr(me, "phone", None)) if me else ""
         duplicate = None
         if normalized_phone and normalized_phone != account.phone:
-            duplicate = (
-                db.query(TelegramAccount)
-                .filter(
-                    TelegramAccount.phone == normalized_phone,
-                    TelegramAccount.id != account.id,
-                )
-                .first()
-            )
+            duplicate = _find_duplicate(db, account, normalized_phone)
+        adopted_session = False
         if duplicate is not None:
             if duplicate.user_id not in (None, user_id):
                 raise HTTPException(status_code=403, detail="этот Telegram-аккаунт уже подключён к другому пользователю")
@@ -76,17 +111,24 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
             db.flush()
             account = duplicate
             account.user_id = user_id
+            account.phone = normalized_phone
             if old_session and old_session != account.session_path:
                 account.session_path = old_session
-        else:
-            account.phone = normalized_phone or phone
+                adopted_session = True
+            else:
+                adopted_session = False
+        elif normalized_phone:
+            account.phone = normalized_phone
         account.telegram_user_id = getattr(me, "id", None) if me else None
         account.username = getattr(me, "username", None) if me else None
         account.first_name = getattr(me, "first_name", None) if me else None
         account.last_name = getattr(me, "last_name", None) if me else None
         account.status = AccountStatus.ACTIVE.value
         db.commit()
-        if duplicate is not None and original_id != account.id:
+        # Remove the temp row's orphan session file only when the fresh login's
+        # session was NOT adopted by the surviving row (otherwise we'd delete
+        # the very session the merged account now uses).
+        if duplicate is not None and original_id != account.id and not adopted_session:
             try:
                 os.remove(_session_path_for_deleted(original_id))
             except FileNotFoundError:

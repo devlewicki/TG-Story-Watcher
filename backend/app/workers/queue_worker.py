@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
+
+from telethon.errors import AuthKeyDuplicatedError
 
 from ..db import SessionLocal
 from ..models import (
@@ -161,6 +164,18 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
         return 0
     try:
         client = await asyncio.wait_for(cm.connect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
+    except AuthKeyDuplicatedError:
+        logger.error("drain_queue(%s) AuthKeyDuplicatedError on connect — session invalidated by IP change", account.id)
+        account.status = AccountStatus.AUTH_REQUIRED.value
+        account.monitoring = False
+        if account.session_path and os.path.isfile(account.session_path):
+            try:
+                os.remove(account.session_path)
+            except OSError:
+                pass
+        account.session_path = None
+        db.commit()
+        return 0
     except (ConnectionError, OSError, TimeoutError) as exc:
         logger.warning("drain_queue(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
         try:
@@ -370,6 +385,35 @@ async def run_once() -> int:
                         db.rollback()
                         await asyncio.sleep(2 ** _attempt)
                         continue
+                    # AuthKey duplicated: VPN IP changed — session is permanently
+                    # invalidated.  Delete the session file and mark AUTH_REQUIRED.
+                    is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
+                    if is_auth_dup:
+                        logger.error("drain_queue(%s) AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
+                        db.rollback()
+                        try:
+                            await cm.drop_client(account.id)
+                        except Exception:
+                            pass
+                        # Re-open a fresh session to update the account status.
+                        db2 = SessionLocal()
+                        try:
+                            acc2 = db2.get(TelegramAccount, account.id)
+                            if acc2 is not None:
+                                acc2.status = AccountStatus.AUTH_REQUIRED.value
+                                acc2.monitoring = False
+                                if acc2.session_path and os.path.isfile(acc2.session_path):
+                                    try:
+                                        os.remove(acc2.session_path)
+                                    except OSError:
+                                        pass
+                                acc2.session_path = None
+                            db2.commit()
+                        except Exception:
+                            db2.rollback()
+                        finally:
+                            db2.close()
+                        break
                     # Connection errors: try a full reconnect before giving up.
                     is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
                     if is_conn and _attempt < 2:

@@ -34,6 +34,11 @@ logger = logging.getLogger("storywatcher.discovery")
 
 RESULT_LIMIT = 50
 
+# Hard ceiling on any single Telegram RPC inside discovery. A half-open TCP
+# through a dropped proxy tunnel would otherwise hang the await forever and
+# starve every future discovery cycle.
+RPC_TIMEOUT = 120.0
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -312,13 +317,16 @@ async def _search_posts(
         if pages > 5:
             break
         try:
-            res = await client(
-                functions.stories.SearchPostsRequest(
-                    offset=offset,
-                    limit=limit,
-                    hashtag=hashtag,
-                    area=area,
-                )
+            res = await asyncio.wait_for(
+                client(
+                    functions.stories.SearchPostsRequest(
+                        offset=offset,
+                        limit=limit,
+                        hashtag=hashtag,
+                        area=area,
+                    )
+                ),
+                timeout=RPC_TIMEOUT,
             )
         except errors.FloodWaitError:
             # Propagate so the per-tag handler can wait it out and continue

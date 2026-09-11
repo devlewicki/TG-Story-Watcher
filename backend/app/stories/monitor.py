@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -24,6 +25,15 @@ from ..services.settings_service import SettingsService
 from ..telegram import client_manager as cm
 
 logger = logging.getLogger("storywatcher.stories")
+
+# Once-per-process flag so the skipped_set cap only warns once instead of
+# spamming the log on every 30s sync cycle.
+_WARNED_SKIP_CAP = False
+
+# Hard ceiling on any single Telegram RPC here. A half-open TCP through a
+# dropped proxy tunnel would otherwise hang the await forever and freeze the
+# whole main loop / background discovery task.
+RPC_TIMEOUT = 120.0
 
 
 def datetime_from_tl(dt) -> datetime | None:
@@ -57,7 +67,9 @@ async def resolve_authors(
     if not peer_ids:
         return result
     try:
-        entities = await client.get_entity(peer_ids)
+        entities = await asyncio.wait_for(
+            client.get_entity(peer_ids), timeout=RPC_TIMEOUT
+        )
         if not isinstance(entities, list):
             entities = [entities]
         for ent in entities:
@@ -103,6 +115,9 @@ class StoryMonitor:
         (up to 24h), inflating the "filtered" counter with duplicates.
         """
         since = datetime.now(timezone.utc) - timedelta(hours=24)
+        # Newest N rows only — without ordering, ``LIMIT`` grabs an arbitrary
+        # slice and the cap silently breaks dedup (re-logging the same skip on
+        # every 30s sync). Newest-first keeps the most relevant entries.
         rows = (
             self.db.query(ActivityLog.meta_json)
             .filter(
@@ -110,7 +125,8 @@ class StoryMonitor:
                 ActivityLog.account_id == self.account.id,
                 ActivityLog.created_at >= since,
             )
-            .limit(5000)  # cap scan to avoid unbounded memory on heavy accounts
+            .order_by(ActivityLog.created_at.desc())
+            .limit(3000)
             .all()
         )
         out: set[tuple[int, int]] = set()
@@ -122,8 +138,13 @@ class StoryMonitor:
             pid, sid = meta.get("peer_id"), meta.get("story_id")
             if pid is not None and sid is not None:
                 out.add((int(pid), int(sid)))
-        if len(rows) >= 5000:
-            logger.warning("skipped_set scan hit 5000-row cap for account %s", self.account.id)
+        global _WARNED_SKIP_CAP
+        if len(rows) >= 3000 and not _WARNED_SKIP_CAP:
+            logger.warning(
+                "skipped_set scan hit 3000-row cap for account %s (dedup covers only newest rows)",
+                self.account.id,
+            )
+            _WARNED_SKIP_CAP = True
         return out
 
     def build_engine(self):
@@ -365,11 +386,14 @@ class StoryMonitor:
         self.invalidate_engine_cache()
         while True:
             try:
-                res = await self.client(
-                    functions.stories.GetAllStoriesRequest(
-                        next=not first,
-                        state=state,
-                    )
+                res = await asyncio.wait_for(
+                    self.client(
+                        functions.stories.GetAllStoriesRequest(
+                            next=not first,
+                            state=state,
+                        )
+                    ),
+                    timeout=RPC_TIMEOUT,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error("getAllStories failed: %s", exc)
@@ -669,7 +693,9 @@ async def load_contacts_into(client, account: TelegramAccount, lookup: FiltersLo
         lookup.contact_peers = set(contact_ids)
         lookup.mutual_peers = set(mutual_ids)
         return
-    contacts = await client(functions.contacts.GetContactsRequest(hash=0))
+    contacts = await asyncio.wait_for(
+        client(functions.contacts.GetContactsRequest(hash=0)), timeout=RPC_TIMEOUT
+    )
     contact_ids: set[int] = set()
     mutual_ids: set[int] = set()
     for c in getattr(contacts, "users", []) or []:

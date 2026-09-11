@@ -88,6 +88,10 @@ const en = {
     passwordLabel: "Two-factor authentication password",
     passwordPlaceholder: "2FA password",
     phoneError: "Please enter a valid phone number.",
+    reloginNeeded: "Re-authentication required",
+    reloginDesc: "The Telegram session expired due to an IP address change. Enter the confirmation code to restore.",
+    reloginButton: "Restore session",
+    sendingCode: "Sending code…",
   },
 
   // Stories

@@ -10,10 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
+from telethon.errors import AuthKeyDuplicatedError
+
 CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
+
+# Hard ceiling for one account's discovery work. Covers connect, contact sync,
+# identity refresh and every search in this cycle; anything longer is a hang
+# (half-open TCP through a dropped tunnel) and gets aborted.
+DISCOVERY_ACCOUNT_TIMEOUT = 300
 
 from ..db import SessionLocal
 from ..models import AccountStatus, TelegramAccount
@@ -67,6 +75,39 @@ async def sync_account(account: TelegramAccount) -> int:
                 db.close()
                 await asyncio.sleep(2 ** _attempt)
                 continue
+            # AuthKey duplicated: VPN IP changed — session is permanently
+            # invalidated.  Delete the session file and mark AUTH_REQUIRED so
+            # the user can re-login from the web UI.
+            is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
+            if is_auth_dup:
+                logger.error("sync_account(%s) AuthKeyDuplicatedError — session invalidated by IP change, marking AUTH_REQUIRED", account.id)
+                db.rollback()
+                db.close()
+                try:
+                    await cm.drop_client(account.id)
+                except Exception:
+                    pass
+                db2 = SessionLocal()
+                try:
+                    acc2 = db2.get(TelegramAccount, account.id)
+                    if acc2 is not None:
+                        acc2.status = AccountStatus.AUTH_REQUIRED.value
+                        acc2.monitoring = False
+                        # Remove the dead session file so the user is
+                        # prompted to re-login instead of hitting the
+                        # same error on every sync cycle.
+                        if acc2.session_path and os.path.isfile(acc2.session_path):
+                            try:
+                                os.remove(acc2.session_path)
+                            except OSError:
+                                pass
+                        acc2.session_path = None
+                    db2.commit()
+                except Exception:
+                    db2.rollback()
+                finally:
+                    db2.close()
+                return 0
             # Connection errors: force a full reconnect before retrying.
             is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
             if is_conn and _attempt < 2:
@@ -116,6 +157,31 @@ async def run_analytics_once() -> None:
                     await _maybe_update_identity(acc, client)
                     local.commit()
                     await collect_account(acc.id, local, client)
+        except AuthKeyDuplicatedError as exc:
+            logger.warning("analytics sync account=%s AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
+            local.close()
+            try:
+                await cm.drop_client(account.id)
+            except Exception:
+                pass
+            db2 = SessionLocal()
+            try:
+                acc2 = db2.get(TelegramAccount, account.id)
+                if acc2 is not None:
+                    acc2.status = AccountStatus.AUTH_REQUIRED.value
+                    acc2.monitoring = False
+                    if acc2.session_path and os.path.isfile(acc2.session_path):
+                        try:
+                            os.remove(acc2.session_path)
+                        except OSError:
+                            pass
+                    acc2.session_path = None
+                db2.commit()
+            except Exception:
+                db2.rollback()
+            finally:
+                db2.close()
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.warning("analytics sync account=%s failed: %s", account.id, exc)
         finally:
@@ -339,7 +405,15 @@ async def run_discovery_once() -> None:
                 exhausted.append(uid_bucket)
                 continue
             acc, cfg = items.pop(0)
-            await _discover_account(acc, cfg)
+            try:
+                await asyncio.wait_for(
+                    _discover_account(acc, cfg), timeout=DISCOVERY_ACCOUNT_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "discover_account(%s) timed out after %ss — aborting this account's cycle",
+                    acc.id, DISCOVERY_ACCOUNT_TIMEOUT,
+                )
         for uid_bucket in exhausted:
             del user_buckets[uid_bucket]
 
@@ -352,10 +426,17 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             return
         try:
             client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
+        except AuthKeyDuplicatedError:
+            logger.error("discover_account(%s) AuthKeyDuplicatedError on connect", account.id)
+            # Fall through to outer except AuthKeyDuplicatedError handler.
+            raise
         except (ConnectionError, OSError, TimeoutError) as exc:
             logger.warning("discover_account(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
             try:
                 client = await asyncio.wait_for(cm.reconnect(acc), timeout=CONNECT_TIMEOUT)
+            except AuthKeyDuplicatedError:
+                logger.error("discover_account(%s) AuthKeyDuplicatedError on reconnect", account.id)
+                raise
             except Exception as reconnect_exc:
                 logger.error("discover_account(%s) reconnect also failed: %s", account.id, reconnect_exc)
                 return
@@ -471,6 +552,30 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             await discovery.search_locations(monitor, locations, limit)
         if hashtags:
             await discovery.search_hashtags(monitor, hashtags, limit)
+    except AuthKeyDuplicatedError as exc:
+        logger.error("discover_account(%s) AuthKeyDuplicatedError — session invalidated by IP change, marking AUTH_REQUIRED", account.id)
+        db.close()
+        try:
+            await cm.drop_client(account.id)
+        except Exception:
+            pass
+        db2 = SessionLocal()
+        try:
+            acc2 = db2.get(TelegramAccount, account.id)
+            if acc2 is not None:
+                acc2.status = AccountStatus.AUTH_REQUIRED.value
+                acc2.monitoring = False
+                if acc2.session_path and os.path.isfile(acc2.session_path):
+                    try:
+                        os.remove(acc2.session_path)
+                    except OSError:
+                        pass
+                acc2.session_path = None
+            db2.commit()
+        except Exception:
+            db2.rollback()
+        finally:
+            db2.close()
     except Exception as exc:  # noqa: BLE001
         logger.error("discover_account(%s) failed: %s", account.id, exc)
     finally:

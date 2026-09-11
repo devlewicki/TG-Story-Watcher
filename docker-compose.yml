@@ -1,4 +1,28 @@
 services:
+  vpn:
+    build: ./docker/vpn
+    image: tg-story-watcher-vpn:latest
+    restart: unless-stopped
+    environment:
+      VPN_SUBSCRIPTION_URL: ${VPN_SUBSCRIPTION_URL:-}
+      VPN_REFRESH_INTERVAL: ${VPN_REFRESH_INTERVAL:-3600}
+      VPN_SOCKS_PORT: ${VPN_SOCKS_PORT:-1080}
+      VPN_LOG_LEVEL: ${VPN_LOG_LEVEL:-warning}
+      VPN_TEST_URL: ${VPN_TEST_URL:-https://www.gstatic.com/generate_204}
+      VPN_TEST_TIMEOUT: ${VPN_TEST_TIMEOUT:-8}
+      VPN_PROBE_INTERVAL: ${VPN_PROBE_INTERVAL:-10}
+      VPN_FAIL_THRESHOLD: ${VPN_FAIL_THRESHOLD:-3}
+      VPN_SCAN_PORT: ${VPN_SCAN_PORT:-1081}
+      VPN_SCAN_SLEEP: ${VPN_SCAN_SLEEP:-1.0}
+      VPN_SCAN_ATTEMPTS: ${VPN_SCAN_ATTEMPTS:-2}
+    healthcheck:
+      test: ["CMD", "curl", "-x", "socks5://127.0.0.1:1080", "-sf", "https://www.gstatic.com/generate_204"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 240s
+      start_interval: 5s
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -45,6 +69,8 @@ services:
       retries: 3
       start_period: 10s
     depends_on:
+      vpn:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -80,6 +106,8 @@ services:
       retries: 3
       start_period: 60s
     depends_on:
+      vpn:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:

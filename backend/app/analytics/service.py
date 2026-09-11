@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -11,6 +12,10 @@ from telethon import functions, types
 from ..models import Story, StoryReactionStat, StoryStatsSnapshot, StoryViewer, TelegramAccount
 
 logger = logging.getLogger("storywatcher.analytics")
+
+# Hard ceiling on a single analytics RPC to prevent a dead tunnel from hanging
+# the analytics background task forever.
+ANALYTICS_RPC_TIMEOUT = 120.0
 
 
 def _dt(value: Any) -> datetime | None:
@@ -41,8 +46,8 @@ def _attr(obj: Any, *names: str, default=None):
 
 async def _call(client, request, account_id: int, story_id: int | None = None):
     try:
-        return await client(request)
-    except Exception as exc:
+        return await asyncio.wait_for(client(request), timeout=ANALYTICS_RPC_TIMEOUT)
+    except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
         logger.warning("analytics request failed account=%s story=%s method=%s error=%s", account_id, story_id, type(request).__name__, exc)
         return None
 

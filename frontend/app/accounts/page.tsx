@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Account, clearToken } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { useTranslation } from "@/lib/i18n";
@@ -61,6 +61,7 @@ export default function AccountsPage() {
 function AccountCard({ account, onChanged }: { account: Account; onChanged: () => void }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
+  const [showRelogin, setShowRelogin] = useState(false);
   const fullName = [account.first_name, account.last_name].filter(Boolean).join(" ");
   const name = fullName || account.username || account.phone;
 
@@ -118,6 +119,19 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
         <span>{t("accounts.lastSeen")} {timeAgo(account.last_seen_at)}</span>
       </div>
 
+      {account.status === "AUTH_REQUIRED" && (
+        <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-500/10">
+          <p className="text-sm font-medium text-orange-800 dark:text-orange-300">{t("accounts.reloginNeeded")}</p>
+          <p className="mt-0.5 text-xs text-orange-600 dark:text-orange-400">{t("accounts.reloginDesc")}</p>
+          <Button
+            className="mt-2 !px-2.5 !py-1 !text-xs"
+            onClick={() => setShowRelogin(true)}
+          >
+            {t("accounts.reloginButton")}
+          </Button>
+        </div>
+      )}
+
       <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
         {account.status !== "ACTIVE" ? (
           <Button variant="secondary" disabled={busy !== null} onClick={() => act("start")}>
@@ -139,30 +153,53 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
           {busy === "delete" ? "…" : t("common.delete")}
         </Button>
       </div>
+
+      {showRelogin && (
+        <AuthModal
+          onClose={() => setShowRelogin(false)}
+          onDone={() => { setShowRelogin(false); onChanged(); }}
+          initialPhone={account.phone}
+          autoSend={true}
+        />
+      )}
     </Card>
   );
 }
 
-function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function AuthModal({ onClose, onDone, initialPhone, autoSend }: { onClose: () => void; onDone: () => void; initialPhone?: string; autoSend?: boolean }) {
   const { t } = useTranslation();
   const [step, setStep] = useState<FlowStep>("phone");
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState(initialPhone ?? "");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const sendCode = async () => {
+  const doSendCode = async (targetPhone: string) => {
     setError("");
-    if (phone.length < 5) return setError(t("accounts.phoneError"));
     setBusy(true);
     try {
-      await api.post("/auth/send-code", { phone });
+      await api.post("/auth/send-code", { phone: targetPhone });
       setStep("code");
     } catch (e) {
       setError((e as Error).message);
     }
     setBusy(false);
+  };
+
+  // Auto-send code on mount when opened in re-login mode.
+  const autoSendHandled = useRef(false);
+  useEffect(() => {
+    if (initialPhone && autoSend && !autoSendHandled.current) {
+      autoSendHandled.current = true;
+      doSendCode(initialPhone);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sendCode = async () => {
+    setError("");
+    if (phone.length < 5) return setError(t("accounts.phoneError"));
+    await doSendCode(phone);
   };
 
   const confirmCode = async () => {
@@ -227,6 +264,10 @@ function AuthModal({ onClose, onDone }: { onClose: () => void; onDone: () => voi
               autoFocus
             />
           </div>
+        )}
+
+        {step === "phone" && busy && (
+          <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">{t("accounts.sendingCode")}</p>
         )}
 
         {step === "code" && (

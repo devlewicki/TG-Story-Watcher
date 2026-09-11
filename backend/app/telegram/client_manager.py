@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sqlite3 as _sqlite3
 import time
 from dataclasses import dataclass, field
@@ -62,6 +63,31 @@ class LoginState:
 def _session_path(account_id: int) -> str:
     os.makedirs(settings.sessions_dir, exist_ok=True)
     return os.path.join(settings.sessions_dir, f"account_{account_id}.session")
+
+
+def normalize_phone(phone: str | None) -> str:
+    """Canonical phone form: digits only (Telegram's own format).
+
+    Users commonly enter ``+7999...`` while Telethon's ``User.phone`` and the
+    DB rows are stored as ``7999...``. Matching on the raw string then spawns
+    duplicate account rows that collide with the unique ``phone`` index on the
+    next login. Keep everything in one canonical form.
+    """
+    if not phone:
+        return ""
+    digits = re.sub(r"\D", "", phone)
+    return digits
+
+
+def _get_proxy():
+    if not settings.telegram_proxy_enabled:
+        return None
+    return {
+        "proxy_type": "socks5",
+        "addr": settings.telegram_proxy_host,
+        "port": settings.telegram_proxy_port,
+        "rdns": True,
+    }
 
 
 def get_credentials(account):
@@ -162,7 +188,11 @@ def _read_session(path: str):
 
 def build_client(account):
     api_id, api_hash = get_credentials(account)
-    return TelegramClient(_read_session(account.session_path or _session_path(account.id)), api_id, api_hash)
+    return TelegramClient(
+        _read_session(account.session_path or _session_path(account.id)),
+        api_id, api_hash,
+        proxy=_get_proxy(),
+    )
 
 
 async def get_client(account):
@@ -214,13 +244,13 @@ async def drop_client(account_id: int):
 
 
 async def update_account_identity(account, client):
-    me = await client.get_me()
+    me = await asyncio.wait_for(client.get_me(), timeout=120.0)
     if me:
         account.telegram_user_id = getattr(me, "id", None)
         account.username = getattr(me, "username", None)
         account.first_name = getattr(me, "first_name", None)
         account.last_name = getattr(me, "last_name", None)
-        account.phone = getattr(me, "phone", None) or account.phone
+        account.phone = normalize_phone(getattr(me, "phone", None)) or account.phone
         new_premium = bool(getattr(me, "premium", False))
         logger.info("update_account_identity phone=%s me.premium=%s me.id=%s", account.phone, getattr(me, "premium", "MISSING"), getattr(me, "id", None))
         if account.is_premium != new_premium:
@@ -289,7 +319,7 @@ async def _ensure_login(phone: str):
     client = _login_clients.get(phone)
     if client is None:
         api_id, api_hash = _login_api()
-        client = TelegramClient(StringSession(), api_id, api_hash)
+        client = TelegramClient(StringSession(), api_id, api_hash, proxy=_get_proxy())
         _login_clients[phone] = client
         _login_states[phone] = LoginState()
     _login_started[phone] = time.monotonic()
@@ -321,23 +351,23 @@ async def _evict_stale_logins():
 
 async def auth_send_code(phone: str):
     client = await _ensure_login(phone)
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             if not client.is_connected():
                 await client.connect()
             sent = await client.send_code_request(phone)
             _login_states[phone].sent = {"phone_code_hash": getattr(sent, "phone_code_hash", None)}
             return
-        except (RuntimeError, errors.AuthRestartError) as exc:
-            if attempt == 2:
+        except (ConnectionError, TimeoutError, OSError, RuntimeError, errors.AuthRestartError) as exc:
+            if attempt == 3:
                 raise
-            logger.info("Restarting Telegram login connection: %s", exc)
+            logger.info("Retrying send-code, connection error #%d: %s", attempt + 1, exc)
             try:
                 await client.disconnect()
             except Exception:
                 pass
             api_id, api_hash = _login_api()
-            client = TelegramClient(StringSession(), api_id, api_hash)
+            client = TelegramClient(StringSession(), api_id, api_hash, proxy=_get_proxy())
             _login_clients[phone] = client
             _login_states[phone] = LoginState()
             _login_started[phone] = time.monotonic()
@@ -350,16 +380,27 @@ async def auth_confirm_code(phone: str, code: str):
     client = _login_clients.get(phone)
     if not client:
         raise ValueError("start authentication first")
-    try:
-        await client.sign_in(phone, code, phone_code_hash=_login_states[phone].sent.get("phone_code_hash"))
-        return {"status": "ok"}
-    except errors.SessionPasswordNeededError:
-        _login_states[phone].needs_password = True
-        return {"status": "twofa"}
-    except errors.PhoneCodeInvalidError:
-        return {"status": "invalid_code"}
-    except errors.PhoneCodeExpiredError:
-        return {"status": "code_expired"}
+    # The VPN tunnel is flaky, so a code confirmation that fails on a dropped
+    # or timed-out connection is retried before surfacing an error to the UI.
+    last_exc = None
+    for attempt in range(3):
+        try:
+            if not client.is_connected():
+                await client.connect()
+            await client.sign_in(phone, code, phone_code_hash=_login_states[phone].sent.get("phone_code_hash"))
+            return {"status": "ok"}
+        except errors.SessionPasswordNeededError:
+            _login_states[phone].needs_password = True
+            return {"status": "twofa"}
+        except errors.PhoneCodeInvalidError:
+            return {"status": "invalid_code"}
+        except errors.PhoneCodeExpiredError:
+            return {"status": "code_expired"}
+        except (ConnectionError, TimeoutError, OSError, errors.RPCError) as exc:
+            last_exc = exc
+            logger.info("Retrying confirm-code, connection error #%d: %s", attempt + 1, exc)
+            await asyncio.sleep(1.0)
+    raise last_exc or RuntimeError("confirm-code retries exhausted")
 
 
 async def auth_confirm_password(phone: str, password: str):
@@ -370,6 +411,9 @@ async def auth_confirm_password(phone: str, password: str):
         await client.sign_in(password=password)
         return True
     except errors.PasswordHashInvalidError:
+        return False
+    except (ConnectionError, TimeoutError, OSError) as exc:
+        logger.info("2FA attempt hit a dropped connection, asking to retry: %s", exc)
         return False
 
 

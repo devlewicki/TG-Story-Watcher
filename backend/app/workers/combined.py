@@ -26,6 +26,7 @@ import time
 from ..db import init_db, SessionLocal
 from . import queue_worker, scheduler
 from ..telegram import client_manager as cm
+from ..vpn_monitor import VpnMonitor
 
 logger = logging.getLogger("storywatcher.combined")
 
@@ -36,6 +37,11 @@ MAX_CONSECUTIVE_ERRORS = int(os.environ.get("WORKER_MAX_ERRORS", "10"))
 # long discovery runs happen as a background task, so a stall is a real hang.
 STALL_TIMEOUT = float(os.environ.get("WORKER_STALL_TIMEOUT", "240"))
 LOG_STALL_EVERY = 60.0
+
+# A discovery cycle is supposed to finish (flood-waits included). If it runs
+# longer than this we assume an unresolvable hang (e.g. half-open TCP through a
+# dropped proxy tunnel) and hard-cancel it so a fresh cycle can start.
+DISCOVERY_WRAP_TIMEOUT = float(os.environ.get("WORKER_DISCOVERY_TIMEOUT", "1200"))
 
 # Monotonic timestamp of the last completed main-loop cycle. Written by run(),
 # read by the watchdog thread. Zero means "loop hasn't ticked yet".
@@ -174,11 +180,40 @@ async def run() -> None:
     last_cleanup = 0.0
     consecutive_errors = 0
     discovery_task: asyncio.Task | None = None
+    discovery_started: float | None = None
+
+    # VPN IP monitor: detect IP changes and proactively disconnect clients.
+    from ..config import get_settings
+    _settings = get_settings()
+    vpn_monitor: VpnMonitor | None = None
+    if _settings.telegram_proxy_enabled and _settings.telegram_proxy_host:
+        vpn_monitor = VpnMonitor(
+            proxy_host=_settings.telegram_proxy_host,
+            proxy_port=_settings.telegram_proxy_port or 1080,
+            check_interval=float(os.environ.get("VPN_IP_CHECK_INTERVAL", "30")),
+        )
+        logger.info("VPN IP monitor enabled (host=%s, interval=%ss)",
+                     _settings.telegram_proxy_host, vpn_monitor._check_interval)
+
+    async def _on_vpn_ip_change() -> None:
+        """Callback: disconnect all Telegram clients when VPN IP changes."""
+        logger.warning("VPN IP change detected — disconnecting all Telegram clients")
+        try:
+            await cm.shutdown_all()
+        except Exception:
+            logger.debug("shutdown_all during VPN IP change failed", exc_info=True)
 
     while True:
         _write_heartbeat()  # mark liveness at the top so healthcheck doesn't false-positive
         now = time.monotonic()
         cycle_had_error = False
+
+        # 0) VPN IP healthcheck — proactively disconnect on IP change.
+        if vpn_monitor is not None:
+            try:
+                await vpn_monitor.tick(_on_vpn_ip_change)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("vpn_monitor tick failed: %s", exc)
 
         # 1) Drain the view queue FIRST — this is time-sensitive (stories expire).
         try:
@@ -226,6 +261,24 @@ async def run() -> None:
         # 5) Global story discovery — run as a background task so it doesn't
         #    block queue processing (discovery can take minutes due to
         #    FloodWait from Telegram's SearchPosts rate limit).
+        if discovery_task is not None and not discovery_task.done():
+            # Stale-task protection: a discovery that outlives
+            # DISCOVERY_WRAP_TIMEOUT is almost certainly hung on dead telethon
+            # awaits. Without cancelling it, the ``done()`` guard below would
+            # starve every future discovery cycle until process restart (the
+            # outage where the project silently stopped at 14:14 UTC).
+            if discovery_started is not None and (now - discovery_started) > DISCOVERY_WRAP_TIMEOUT:
+                logger.critical(
+                    "discovery cycle overran %.0fs — cancelling stale task",
+                    now - discovery_started,
+                )
+                discovery_task.cancel()
+                try:
+                    await discovery_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                discovery_task = None
+                discovery_started = None
         if discovery_task is None or discovery_task.done():
             async def _run_discovery():
                 try:
@@ -233,9 +286,12 @@ async def run() -> None:
                     await scheduler.run_discovery_once()
                     elapsed = time.monotonic() - t0
                     logger.info("discovery cycle completed in %.1fs", elapsed)
+                except asyncio.CancelledError:
+                    logger.warning("discovery cycle cancelled after %.1fs", time.monotonic() - t0)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("discovery cycle error: %s", exc)
             discovery_task = asyncio.create_task(_run_discovery())
+            discovery_started = now
 
         # --- Watchdog bookkeeping ---
         if cycle_had_error:

@@ -28,7 +28,10 @@ accounts, tags, search settings, rules, queues, history, and analytics.
 - [Settings Reference](#settings-reference)
 - [Account & Queue Statuses](#account--queue-statuses)
 - [Telegram Limits & Safety](#telegram-limits--safety)
+- [VPN & Proxy Support](#vpn--proxy-support)
 - [Performance](#performance)
+- [Security](#security)
+- [Reliability & Self-Healing](#reliability--self-healing)
 - [Multi-User Data Isolation](#multi-user-data-isolation)
 - [Database](#database)
 - [API (summary)](#api-summary)
@@ -58,7 +61,10 @@ accounts, tags, search settings, rules, queues, history, and analytics.
 - **Account analytics** — own active/archived Stories, views, reactions, forwards,
   ER, viewer lists, time-based snapshots, best Stories, period filters
 - **Responsive web UI** with dark/light theme and EN/RU translations
-- **Docker Compose deployment** — PostgreSQL, Redis, worker, frontend, Nginx
+- **VPN proxy support** — built-in Xray SOCKS5 proxy for Telegram MTProto
+  with subscription-based server management, automatic failover, and IP
+  change monitoring
+- **Docker Compose deployment** — PostgreSQL, Redis, VPN (Xray), worker, frontend, Nginx
 - **Self-healing** — the worker restarts on hangs, stuck queue tasks are
   recovered automatically, every service has a healthcheck
 
@@ -91,19 +97,26 @@ Nginx ───────────────────► Next.js front
    ▼
 FastAPI backend ─────────► PostgreSQL (data) + Redis (cache)
    │
-   ▼
-Single background process (worker)
+   ├── Single background process (worker)
+   │   ├── Scheduler (story sync, analytics collection)
+   │   ├── View queue (delays, rate limits, task recovery)
+   │   ├── Discovery controller (adaptive search, geo/hashtag rotation)
+   │   └── VPN IP monitor (detects IP changes → reconnects Telegram clients)
    │
-   ├── Scheduler (story sync, analytics collection)
-   ├── View queue (delays, rate limits, task recovery)
-   └── Discovery controller (adaptive search, geo/hashtag rotation)
+   └── VPN container (Xray SOCKS5)
+       └── Routes Telegram MTProto traffic through proxied tunnel
 ```
 
-A single `worker` process combines sync, queue, and discovery because Telethon
-session files cannot be safely opened from multiple processes. The FastAPI
-backend serves the REST API and updates the view queue in real time; the
-worker picks up tasks, authorizes as a connected Telegram account, and performs
-views with all limits enforced.
+A single `worker` process combines sync, queue, discovery, and analytics
+because Telethon session files cannot be safely opened from multiple processes.
+The FastAPI backend serves the REST API and updates the view queue in real
+time; the worker picks up tasks, authorizes as a connected Telegram account,
+and performs views with all limits enforced.
+
+The optional VPN container runs an Xray SOCKS5 proxy that routes Telegram
+MTProto traffic through a remote server. When the VPN's external IP changes
+(e.g. server reconnection), the worker proactively disconnects all Telegram
+clients before they hit `AuthKeyDuplicatedError`.
 
 ## Auto-Configuration
 
@@ -215,6 +228,12 @@ TELEGRAM_API_HASH=your_api_hash_here
 #   python -c "import secrets; print(secrets.token_urlsafe(32))"
 SECRET_KEY=your_random_secret_here
 STORYWATCHER_API_TOKEN=your_random_token_here
+
+# Optional: VPN proxy for Telegram MTProto
+# TELEGRAM_PROXY_ENABLED=true
+# TELEGRAM_PROXY_HOST=vpn
+# TELEGRAM_PROXY_PORT=1080
+# VPN_SUBSCRIPTION_URL=https://your-v2ray-subscription-url
 ```
 
 ### 3. Build and run
@@ -246,10 +265,11 @@ Containers:
 
 | Container | Purpose |
 |---|---|
+| `vpn` | Xray SOCKS5 proxy (vmess/vless/shadowsocks/trojan) with auto-failover |
 | `postgres` | PostgreSQL 16 database |
 | `redis` | Redis 7 cache |
 | `backend` | FastAPI REST API (port 9000, internal only) |
-| `worker` | Single background process: sync + queue + analytics + discovery |
+| `worker` | Single background process: sync + queue + analytics + discovery + VPN monitor |
 | `frontend` | Next.js SSR web UI (port 3000, internal only) |
 | `nginx` | Reverse proxy, exposes external port 8081 |
 
@@ -275,6 +295,7 @@ docker compose down -v     # stop AND delete all data (careful!)
 ```bash
 docker compose logs -f worker
 docker compose logs --tail=200 backend
+docker compose logs -f vpn
 
 # Backup PostgreSQL
 docker compose exec postgres pg_dump -U storywatcher storywatcher > backup.sql
@@ -345,15 +366,38 @@ python -m app.workers.combined
 All variables are set in `.env` (project root); Compose passes them into
 containers. A ready-to-copy template is `.env.example`.
 
+### Core
+
 | Variable | Default | Description |
 |---|---|---|
 | `APP_NAME` | `StoryWatcher` | Application name (display only) |
 | `SECRET_KEY` | `dev-secret-key` | App secret key (signs user tokens); **change it** |
 | `DEBUG` | `false` | Debug mode (verbose logging) |
 | `STORYWATCHER_API_TOKEN` | — | API token protecting the panel; sent by the frontend in the `X-API-Token` header |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:9000/api` | Frontend API base URL (set to `/api` in Docker via Nginx) |
+
+### Telegram
+
+| Variable | Default | Description |
+|---|---|---|
 | `TELEGRAM_API_ID` | — | Telegram API ID from my.telegram.org (**required**) |
 | `TELEGRAM_API_HASH` | — | Telegram API Hash from my.telegram.org (**required**) |
 | `SESSIONS_DIR` | `/data/sessions` | Telegram session files directory |
+
+### Database & Cache
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_USER` | `storywatcher` | PostgreSQL user |
+| `POSTGRES_PASSWORD` | `storywatcher` | PostgreSQL password (**change it**) |
+| `POSTGRES_DB` | `storywatcher` | PostgreSQL database name |
+| `DATABASE_URL` | `postgresql+psycopg2://storywatcher:storywatcher@postgres:5432/storywatcher` | Database URL |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis URL |
+
+### Worker & Performance
+
+| Variable | Default | Description |
+|---|---|---|
 | `STORYWATCHER_SYNC_INTERVAL` | `30` | Story sync interval (seconds) |
 | `STORYWATCHER_WORKER_POLL` | `1` | Worker poll interval (seconds) |
 | `STORYWATCHER_ANALYTICS_INTERVAL` | `3600` | How often to collect full archive analytics (seconds) |
@@ -361,16 +405,27 @@ containers. A ready-to-copy template is `.env.example`.
 | `WORKER_HEARTBEAT` | `/tmp/worker_heartbeat` | Heartbeat file used by the worker healthcheck |
 | `WORKER_MAX_ERRORS` | `10` | Consecutive cycle errors before exit + restart |
 | `WEB_PORT` | `8081` | External web interface port |
-| `POSTGRES_USER` | `storywatcher` | PostgreSQL user |
-| `POSTGRES_PASSWORD` | `storywatcher` | PostgreSQL password (**change it**) |
-| `POSTGRES_DB` | `storywatcher` | PostgreSQL database name |
-| `DATABASE_URL` | `postgresql+psycopg2://storywatcher:storywatcher@postgres:5432/storywatcher` | Database URL |
-| `REDIS_URL` | `redis://redis:6379/0` | Redis URL |
+
+### VPN / Proxy
+
+| Variable | Default | Description |
+|---|---|---|
 | `TELEGRAM_PROXY_ENABLED` | `false` | Enable MTProto proxy for Telegram |
-| `TELEGRAM_PROXY_HOST` | — | MTProto proxy host |
-| `TELEGRAM_PROXY_PORT` | — | MTProto proxy port |
+| `TELEGRAM_PROXY_HOST` | `vpn` | MTProto proxy host (container name) |
+| `TELEGRAM_PROXY_PORT` | `1080` | MTProto proxy port |
 | `TELEGRAM_PROXY_SECRET` | — | MTProto proxy secret |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:9000/api` | Frontend API base URL (set to `/api` in Docker via Nginx) |
+| `VPN_SUBSCRIPTION_URL` | — | V2Ray subscription URL for the VPN container |
+| `VPN_REFRESH_INTERVAL` | `3600` | How often to re-fetch the subscription (seconds) |
+| `VPN_SOCKS_PORT` | `1080` | SOCKS5 port exposed by the VPN container |
+| `VPN_LOG_LEVEL` | `warning` | Xray log level |
+| `VPN_TEST_URL` | `https://www.gstatic.com/generate_204` | URL for tunnel connectivity tests |
+| `VPN_TEST_TIMEOUT` | `8` | Timeout for tunnel tests (seconds) |
+| `VPN_PROBE_INTERVAL` | `10` | How often to probe tunnel health (seconds) |
+| `VPN_FAIL_THRESHOLD` | `3` | Consecutive probe failures before failover |
+| `VPN_SCAN_PORT` | `1081` | Dedicated port for candidate scanning (avoids dropping the live proxy) |
+| `VPN_SCAN_SLEEP` | `1.0` | Delay between scan probes (seconds) |
+| `VPN_SCAN_ATTEMPTS` | `2` | Probe attempts per candidate during scan |
+| `VPN_IP_CHECK_INTERVAL` | `30` | How often the VPN IP monitor checks for IP changes (seconds) |
 
 ### Production Security
 
@@ -463,6 +518,53 @@ automated actions. The app handles this gracefully:
 > Going beyond safe limits is at your own risk — Telegram may restrict or ban
 > accounts that exhibit bot-like behavior.
 
+## VPN & Proxy Support
+
+The application includes a built-in VPN container for routing Telegram MTProto
+traffic through a remote proxy server. This is useful when:
+
+- Telegram is blocked in your region
+- You need to route traffic through a specific country
+- Your server's IP is rate-limited by Telegram
+
+### Supported Protocols
+
+The VPN container runs [Xray](https://xtls.github.io/) and supports
+subscription-based configurations with the following proxy protocols:
+
+- **VMess** (with TLS, WebSocket, gRPC transports)
+- **VLESS** (with TLS, Reality, WebSocket, gRPC, xhttp transports)
+- **Shadowsocks** (SIP002 and legacy format)
+- **Trojan**
+
+### How It Works
+
+1. The VPN container fetches your V2Ray subscription URL on startup
+2. Parses all server links and tests each candidate on a dedicated scan port
+3. Selects the fastest working server and starts Xray as a SOCKS5 proxy
+4. The `worker` container routes Telegram traffic through the SOCKS5 proxy
+5. A **VPN IP monitor** continuously checks the external IP — when it changes
+   (e.g. VPN reconnected to a different country), all Telegram clients are
+   proactively disconnected to prevent `AuthKeyDuplicatedError`
+
+### Failover
+
+- Periodic tunnel health checks every `VPN_PROBE_INTERVAL` seconds
+- After `VPN_FAIL_THRESHOLD` consecutive failures, the VPN container scans
+  all candidates in the subscription and switches to the fastest working server
+- A cooldown period prevents excessive re-scanning
+- The live SOCKS5 port is never dropped during scanning — only replaced once
+  a verified replacement is ready
+
+### Enabling VPN
+
+1. Set `VPN_SUBSCRIPTION_URL` in `.env` to your V2Ray subscription URL
+2. Set `TELEGRAM_PROXY_ENABLED=true`
+3. Set `TELEGRAM_PROXY_HOST=vpn` and `TELEGRAM_PROXY_PORT=1080`
+4. Rebuild: `docker compose up -d --build`
+
+The VPN container will be included automatically in the compose stack.
+
 ## Performance
 
 - **Dashboard charts** — aggregated queries (`EXTRACT(HOUR)`, `DATE()`) instead
@@ -474,6 +576,74 @@ automated actions. The app handles this gracefully:
   `pool_timeout=10s`, `pool_recycle=1800s`
 - **Archive analytics** — collected rarely (default once per hour) so it never
   floods Telegram RPC usage during real-time viewing
+- **Queue worker** — per-task timeouts prevent single stuck RPC from blocking
+  the entire queue; DB sessions opened inside the semaphore to avoid pool
+  exhaustion
+
+## Security
+
+### Authentication
+
+- **Local registration** — PBKDF2-SHA256 password hashing (310k iterations)
+- **Token-based auth** — `user.<base64 payload>.<hmac signature>` tokens with
+  30-day expiry, validated via HMAC against `SECRET_KEY`
+- **Token revocation** — tokens can be revoked through the settings store
+- **User isolation** — all endpoints are scoped to the authenticated user's
+  `user_id`; cross-user data access is blocked at the API layer
+
+### Endpoint Protection
+
+- User auth endpoints (`/api/user-auth/*`) handle registration and login
+- Telegram auth endpoints (`/api/auth/*`) require a valid user token
+- Account, stories, queue, analytics, and settings endpoints all require
+  authentication via the `X-API-Token` header
+- Health check (`/api/health`) is the only unauthenticated endpoint
+
+### Recommendations
+
+- Change `SECRET_KEY` and `STORYWATCHER_API_TOKEN` for production
+- Set a strong `POSTGRES_PASSWORD`
+- Run behind an HTTPS reverse proxy (Nginx/Caddy)
+- The `.env` file is excluded from Git via `.gitignore`
+
+## Reliability & Self-Healing
+
+### Worker Watchdog
+
+- The worker writes a heartbeat file every cycle
+- If no progress for `WORKER_STALL_TIMEOUT` seconds, the worker exits
+- Docker's `restart: unless-stopped` policy restarts it automatically
+- After `WORKER_MAX_ERRORS` consecutive cycle failures, the worker exits
+
+### Queue Recovery
+
+- Tasks stuck in `PROCESSING` (e.g. after a crash) are automatically returned
+  to `PENDING` and retried
+- Per-task timeouts (`asyncio.wait_for`) prevent single stuck RPC from
+  blocking the queue
+- Timed-out tasks return to `PENDING` with a 30-second delay, or move to
+  `FAILED` when the auto-retry budget is exhausted
+
+### VPN Resilience
+
+- The VPN container probes tunnel health and fails over to backup servers
+- The VPN IP monitor detects IP changes and proactively disconnects Telegram
+  clients to prevent `AuthKeyDuplicatedError`
+- After IP change, Telegram clients reconnect automatically on the next cycle
+
+### Healthchecks
+
+Every container has a healthcheck:
+
+| Container | Method | Interval |
+|---|---|---|
+| `postgres` | `pg_isready` | 5s |
+| `redis` | `redis-cli ping` | 5s |
+| `backend` | HTTP `/api/health` | 15s |
+| `worker` | Heartbeat file check | 15s |
+| `frontend` | `fetch()` on port 3000 | 15s |
+| `nginx` | `wget` on port 80 | 15s |
+| `vpn` | `curl` through SOCKS5 | 20s |
 
 ## Multi-User Data Isolation
 
@@ -565,35 +735,89 @@ running the backend directly).
 TG-Story-Watcher/
 ├── frontend/                      # Next.js 14 + React 18 + TypeScript + Tailwind
 │   ├── app/                       # Pages (App Router)
-│   ├── components/                # UI components, Sidebar, PlacesMap
-│   ├── lib/                       # API client, theme, hooks, translations
+│   │   ├── page.tsx               # Dashboard
+│   │   ├── accounts/              # Telegram account management
+│   │   ├── stories/               # Story listing and details
+│   │   ├── queue/                 # View queue management
+│   │   ├── analytics/             # Analytics overview and story details
+│   │   ├── discovery/             # Hashtag/place/geo search
+│   │   ├── settings/              # App settings (limits, view, discovery)
+│   │   ├── whitelist/             # Author whitelist
+│   │   ├── blacklist/             # Author blacklist
+│   │   ├── history/               # View and activity history
+│   │   └── statistics/            # Account statistics
+│   ├── components/                # UI components
+│   │   ├── ui.tsx                 # Shared UI primitives (Button, Card, etc.)
+│   │   ├── AppShell.tsx           # Main layout wrapper
+│   │   ├── Sidebar.tsx            # Navigation sidebar
+│   │   ├── PlacesMap.tsx          # Leaflet map for places
+│   │   ├── GeoSearchMap.tsx       # Geo-radius search map
+│   │   ├── ListManager.tsx        # Whitelist/blacklist management
+│   │   └── TokenGate.tsx          # Auth token gate
+│   ├── lib/                       # Utilities
+│   │   ├── api.ts                 # API client (api.get, api.post, etc.)
+│   │   ├── theme.tsx              # Dark/light theme provider
+│   │   ├── i18n.tsx               # Internationalization (EN/RU)
+│   │   ├── format.ts              # Formatting helpers
+│   │   ├── compute_all_from_daily.ts  # Client-side derived parameter calculation
+│   │   ├── useFetch.ts            # Data fetching hook
+│   │   └── translations/          # en.ts, ru.ts
 │   ├── Dockerfile
 │   └── package.json
 ├── backend/                       # Python 3.12 + FastAPI + SQLAlchemy
 │   ├── app/
-│   │   ├── api/                   # Routes (auth, accounts, stories, queue, ...)
-│   │   ├── analytics/             # Analytics service
-│   │   ├── filters/               # Filter engine
-│   │   ├── queue/                 # Queue processor
-│   │   ├── services/              # Business logic (auto-derived settings)
-│   │   ├── stories/               # Story monitoring and discovery
-│   │   ├── telegram/              # MTProto client (Telethon)
-│   │   ├── workers/               # Workers (queue_worker, scheduler, combined)
-│   │   ├── config.py              # Settings (pydantic-settings)
-│   │   ├── db.py                  # SQLAlchemy engine and sessions
-│   │   ├── main.py                # FastAPI application
-│   │   └── models.py              # ORM models
+│   │   ├── api/                   # Routes
+│   │   │   ├── auth.py            # Telegram MTProto authorization
+│   │   │   ├── user_auth.py       # Local user registration/login
+│   │   │   ├── accounts.py        # Telegram account CRUD
+│   │   │   ├── stories.py         # Story listing and management
+│   │   │   ├── queue.py           # View queue CRUD
+│   │   │   ├── analytics.py       # Analytics endpoints
+│   │   │   ├── dashboard.py       # Dashboard data
+│   │   │   ├── settings.py        # Settings CRUD
+│   │   │   ├── discovery.py       # Discovery config, places, geocode, search
+│   │   │   ├── whitelist.py       # Whitelist CRUD
+│   │   │   ├── blacklist.py       # Blacklist CRUD
+│   │   │   ├── rules.py           # Automation rules
+│   │   │   ├── history.py         # View/activity history
+│   │   │   ├── schemas.py         # Pydantic schemas
+│   │   │   ├── deps.py            # Auth dependencies (current_user_id)
+│   │   │   └── timezone.py        # Timezone helpers
+│   │   ├── analytics/             # Analytics service (archive collection)
+│   │   ├── filters/               # Filter engine for story processing
+│   │   ├── queue/                 # Queue processor (per-request RPC timeouts)
+│   │   ├── services/              # Business logic (settings auto-derivation)
+│   │   ├── stories/               # Story monitoring, discovery, and ingest
+│   │   ├── telegram/              # MTProto client manager (Telethon)
+│   │   │   └── client_manager.py  # Session lifecycle, SQLite conversion
+│   │   ├── workers/               # Background workers
+│   │   │   ├── combined.py        # Entry point: scheduler + queue + VPN monitor
+│   │   │   ├── scheduler.py       # Story sync, analytics, discovery scheduling
+│   │   │   └── queue_worker.py    # Queue draining with concurrency control
+│   │   ├── config.py              # pydantic-settings configuration
+│   │   ├── db.py                  # SQLAlchemy engine, sessions, pool
+│   │   ├── main.py                # FastAPI app (lifespan, CORS, health)
+│   │   ├── models.py              # ORM models (15 tables)
+│   │   ├── multitenancy.py        # User token creation/verification (HMAC)
+│   │   └── vpn_monitor.py         # VPN IP change detection
 │   ├── tests/                     # Integration tests (pytest + SQLite)
 │   ├── migrate_limits_derived.py  # Migration: recalculate derived settings
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── healthcheck.sh
 ├── docker/
-│   └── nginx.conf                 # Nginx reverse proxy config
-├── docker-compose.yml
+│   ├── nginx.conf                 # Nginx reverse proxy config
+│   └── vpn/
+│       ├── Dockerfile             # Xray VPN container (Alpine + Xray)
+│       └── entrypoint.sh          # Subscription parser, server selection, failover
+├── docker-compose.yml             # 7 services: vpn, postgres, redis, backend, worker, frontend, nginx
 ├── .env.example
 ├── CONTRIBUTING.md
 ├── LICENSE
+├── bugs.md                        # Bug tracker (fixed and open issues)
+├── AUDIT_REPORT.md                # Full repository audit report
+├── audit-report-technical.md      # Technical audit report
+├── deployment.md                  # Production deployment guide (tgstory.space)
 └── README.md / README_ru.md
 ```
 
@@ -607,7 +831,7 @@ pip install pytest httpx
 python -m pytest tests/ -v
 ```
 
-**54 tests** cover: Stories pagination/sorting, aggregated dashboard charts,
+Tests cover: Stories pagination/sorting, aggregated dashboard charts,
 statistics, analytics (viewers/periods/top stories), `compute_all_from_daily()`
 caching, and discovery rotation dict isolation.
 
@@ -618,12 +842,16 @@ caching, and discovery rotation dict isolation.
 | Containers keep restarting | `docker compose ps` and `docker compose logs --tail=200 backend worker`. Check Telegram API credentials in `.env` |
 | Telegram code not received | `docker compose logs --tail=200 backend`. The login flow recreates the client on errors. Wait briefly and request a fresh code |
 | Views stopped / queue stuck | Check account and worker status: `docker compose ps`, `docker compose logs --tail=200 worker`. Stuck `PROCESSING` items recover automatically |
-| Worker "hangs" (healthy but silent) | The new worker exits after `WORKER_STALL_TIMEOUT` without main-loop progress and Docker restarts it. Or run `docker compose restart worker` |
+| Worker "hangs" (healthy but silent) | The worker exits after `WORKER_STALL_TIMEOUT` without main-loop progress and Docker restarts it. Or run `docker compose restart worker` |
 | Telegram profile missing | Refresh the Accounts page after authorization |
 | A user sees another user's data | Sign out, clear browser site storage, sign in again. Do not reuse tokens between profiles |
 | `FLOOD_WAIT` on an account | Expected — Telegram rate-limited the account. The worker backs off automatically |
+| `AuthKeyDuplicatedError` | The VPN IP changed and clients were reconnected. If persistent, check VPN logs: `docker compose logs vpn` |
 | Port 8081 is busy | Change `WEB_PORT` in `.env` |
 | Frontend shows an old UI | Hard refresh the browser (Ctrl+Shift+R) |
+| VPN not connecting | Check `docker compose logs vpn`. Verify `VPN_SUBSCRIPTION_URL` is set and the subscription is valid |
+| VPN fails over frequently | Check the subscription for working servers. Increase `VPN_FAIL_THRESHOLD` to reduce sensitivity |
+| VPN IP change causing issues | The VPN monitor proactively disconnects clients on IP change. Check `docker compose logs worker` for reconnection logs |
 
 ## Contributing
 

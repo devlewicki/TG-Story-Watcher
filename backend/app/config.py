@@ -34,6 +34,11 @@ class Settings(BaseSettings):
 
     sessions_dir: str = "./sessions"
 
+    # Telegram SOCKS5 proxy (via VPN container)
+    telegram_proxy_enabled: bool = False
+    telegram_proxy_host: str = "vpn"
+    telegram_proxy_port: int = 1080
+
     api_token: OptStr = Field(default=None, validation_alias="STORYWATCHER_API_TOKEN")
 
     # How often the worker runs full archive analytics collection per account

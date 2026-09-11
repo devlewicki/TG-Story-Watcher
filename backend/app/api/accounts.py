@@ -50,7 +50,21 @@ def list_accounts(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
 
 @router.post("/accounts", response_model=AccountResponse, status_code=201)
 def create_account(payload: AccountCreate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
-    existing = db.query(TelegramAccount).filter_by(phone=payload.phone).first()
+    canonical = cm.normalize_phone(payload.phone) or payload.phone
+    existing = (
+        db.query(TelegramAccount)
+        .filter(TelegramAccount.phone == canonical)
+        .first()
+    )
+    if existing is None:
+        # Legacy rows may store the phone with a '+' prefix; match by digits.
+        existing = next(
+            (
+                a for a in db.query(TelegramAccount).all()
+                if cm.normalize_phone(a.phone) == canonical
+            ),
+            None,
+        )
     if existing is not None:
         if existing.user_id not in (None, user_id):
             raise HTTPException(status_code=409, detail="account with this phone already exists")
@@ -60,7 +74,7 @@ def create_account(payload: AccountCreate, db: Db, user_id: Annotated[int, Depen
         existing.api_hash = payload.api_hash or existing.api_hash
         db.commit()
         return AccountResponse(account_id=existing.id, status=existing.status)
-    acc = TelegramAccount(phone=payload.phone, user_id=user_id, status=AccountStatus.DISCONNECTED.value, api_id=payload.api_id, api_hash=payload.api_hash)
+    acc = TelegramAccount(phone=canonical, user_id=user_id, status=AccountStatus.DISCONNECTED.value, api_id=payload.api_id, api_hash=payload.api_hash)
     db.add(acc)
     db.commit()
     db.refresh(acc)
