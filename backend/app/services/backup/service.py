@@ -210,6 +210,21 @@ class BackupService:
         finally:
             raw.close()
 
+    def _probe_dump(self, dump_path: str) -> None:
+        """Verify the dump is readable by the local pg_restore (TOC only).
+
+        Raises BackupError if the pg_dump/pg_restore versions are incompatible
+        or the file is corrupt. Never touches any database.
+        """
+        proc = subprocess.run(
+            ["pg_restore", "--list", dump_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            raise BackupError(f"dump is not readable by local pg_restore: {proc.stderr.strip()[:300]}")
+        if not proc.stdout.strip():
+            raise BackupError("pg_restore --list produced an empty table of contents")
+
     def _restore_database(self, dump_path: str) -> None:
         url = str(engine.url)
         if url.startswith("postgresql"):
@@ -649,16 +664,38 @@ class BackupService:
                                 else (len(sessions) == int(manifest_sessions))
                             )
 
+                            # Probe the dump with the actual pg_restore that
+                            # would perform the restore: catches pg_dump/pg_restore
+                            # version mismatches ("unsupported version in file
+                            # header") at VALIDATION time instead of mid-restore.
+                            # If pg_restore is not installed at all, the probe is
+                            # skipped (unknown) rather than failing validation.
+                            dump_readable = None
+                            if has_dump:
+                                self._set_progress(op_id, 90, "dump probe")
+                                dump_m = tar.extractfile(f"{ARCHIVE_MEMBER_ROOT}{DB_DUMP_NAME}")
+                                dump_probe_path = os.path.join(workdir, "probe.dump")
+                                with open(dump_probe_path, "wb") as dfh:
+                                    if dump_m is not None:
+                                        shutil.copyfileobj(dump_m, dfh)
+                                try:
+                                    self._probe_dump(dump_probe_path)
+                                    dump_readable = True
+                                except BackupError:
+                                    dump_readable = False
+                                except (FileNotFoundError, OSError):
+                                    dump_readable = None  # pg_restore unavailable — skip probe
+
                             result = {
-                                "valid": checksum_errors == 0 and has_dump,
+                                "valid": checksum_errors == 0 and has_dump and dump_readable is not False,
                                 "integrity": "VALID" if checksum_errors == 0 else f"{checksum_errors} mismatches",
-                                "database": "VALID" if has_dump else "MISSING",
+                                "database": ("VALID" if has_dump and dump_readable is not False else "MISSING" if not has_dump else "UNREADABLE"),
                                 "config": "PRESENT" if has_config else "MISSING",
                                 "sessions": len(sessions),
                                 "session_parity": session_parity,
                                 "manifest": manifest,
                                 "checked_files": checked,
-                                "compatibility": "COMPATIBLE",
+                                "compatibility": ("COMPATIBLE" if dump_readable is not False else "INCOMPATIBLE"),
                             }
                             self._set_progress(op_id, 100, "done")
                             self._finish_op(op_id, "SUCCESS")
