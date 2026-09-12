@@ -54,6 +54,14 @@ def _run_migrations() -> None:
         except Exception as e:
             logger.debug("Migration: is_premium skip — %s", e)
 
+        # --- backup_operations.stage: widen varchar(128) -> TEXT ---
+        # Validation/restore results are stored as JSON here and exceed 128 chars.
+        try:
+            conn.execute(text("ALTER TABLE backup_operations ALTER COLUMN stage TYPE TEXT"))
+            logger.info("Migration: backup_operations.stage -> TEXT")
+        except Exception as e:
+            logger.debug("Migration: stage skip — %s", e)
+
         # Reset lock_timeout
         try:
             conn.execute(text("RESET lock_timeout"))

@@ -6,9 +6,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# System deps for psycopg2 and telethon crypto.
+# System deps for psycopg2, telethon crypto, and pg_dump/pg_restore
+# (required by the admin BackupService for PostgreSQL backups).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && apt-get install -y --no-install-recommends gcc libpq-dev postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

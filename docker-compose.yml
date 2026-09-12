@@ -79,6 +79,7 @@ services:
       - "9000:8000"
     volumes:
       - sessions_data:/data/sessions
+      - backups_data:/data/backups
 
   worker:
     image: tg-story-watcher-backend:latest
@@ -114,6 +115,7 @@ services:
         condition: service_healthy
     volumes:
       - sessions_data:/data/sessions
+      - backups_data:/data/backups
 
   frontend:
     build:
@@ -152,3 +154,4 @@ services:
 volumes:
   postgres_data:
   sessions_data:
+  backups_data:

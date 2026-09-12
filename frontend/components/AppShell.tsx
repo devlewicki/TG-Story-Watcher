@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Sidebar, TopBar } from "@/components/Sidebar";
 import { TokenGateContent } from "@/components/TokenGate";
+import { SHELL_CONTENT_OFFSET_CLASSES, SHELL_MAIN_CLASSES } from "@/components/shellLayout";
 import { getToken } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 
@@ -69,9 +70,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen">
       <Sidebar />
-      <div className="md:pl-64">
+      <div className={SHELL_CONTENT_OFFSET_CLASSES}>
         <TopBar />
-        <main className="mx-auto max-w-6xl px-4 pb-24 pt-4 sm:px-6 sm:py-6">{children}</main>
+        <main className={SHELL_MAIN_CLASSES}>{children}</main>
       </div>
       <BottomNav />
     </div>

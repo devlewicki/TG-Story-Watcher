@@ -25,6 +25,12 @@ import time
 
 from ..db import init_db, SessionLocal
 from . import queue_worker, scheduler
+from .worker_control import (
+    _publish_heartbeat,
+    consume_control,
+    is_paused,
+    publish_status,
+)
 from ..telegram import client_manager as cm
 from ..vpn_monitor import VpnMonitor
 
@@ -46,16 +52,23 @@ DISCOVERY_WRAP_TIMEOUT = float(os.environ.get("WORKER_DISCOVERY_TIMEOUT", "1200"
 # Monotonic timestamp of the last completed main-loop cycle. Written by run(),
 # read by the watchdog thread. Zero means "loop hasn't ticked yet".
 _last_cycle_ts = 0.0
+_worker_started_at = 0.0
 
 
 def _write_heartbeat() -> None:
-    """Atomically write the current monotonic time to the heartbeat file."""
+    """Atomically write the current wall-clock time to the heartbeat file and
+    mirror it into Redis so other containers (backend/admin panel) can read it."""
+    ts = time.time()
     try:
         tmp = HEARTBEAT_PATH + ".tmp"
         with open(tmp, "w") as fh:
-            fh.write(str(time.time()))
+            fh.write(str(ts))
         os.replace(tmp, HEARTBEAT_PATH)
     except OSError:
+        pass
+    try:
+        _publish_heartbeat(ts)
+    except Exception:
         pass
 
 
@@ -163,6 +176,8 @@ def _cleanup_old_data() -> None:
 
 async def run() -> None:
     init_db()  # ensure tables exist even if the API hasn't booted yet
+    global _worker_started_at
+    _worker_started_at = time.time()
     sync_interval = float(os.environ.get("STORYWATCHER_SYNC_INTERVAL", "30"))
     poll_interval = float(os.environ.get("STORYWATCHER_WORKER_POLL", "1.0"))
     analytics_interval = float(os.environ.get("STORYWATCHER_ANALYTICS_INTERVAL", "3600"))
@@ -203,10 +218,35 @@ async def run() -> None:
         except Exception:
             logger.debug("shutdown_all during VPN IP change failed", exc_info=True)
 
+    restart_requested = False
     while True:
         _write_heartbeat()  # mark liveness at the top so healthcheck doesn't false-positive
         now = time.monotonic()
         cycle_had_error = False
+
+        # -1) Admin control flags: consume restart request, honor pause.
+        #     Pause skips Telegram-touching stages (queue/sync/analytics/discovery)
+        #     but keeps the loop + heartbeat alive so the worker shows as Running
+        #     (Paused) and can resume without a restart.
+        try:
+            ctrl = consume_control()
+            if ctrl.get("restart"):
+                logger.warning("restart requested via admin panel — initiating safe shutdown")
+                restart_requested = True
+            paused = is_paused()
+        except Exception:
+            logger.debug("worker control check failed", exc_info=True)
+            paused = False
+
+        if paused:
+            publish_status({
+                "running": True,
+                "paused": True,
+                "cycle_started": time.time(),
+            })
+            _write_heartbeat()
+            await asyncio.sleep(max(poll_interval, 2.0))
+            continue
 
         # 0) VPN IP healthcheck — proactively disconnect on IP change.
         if vpn_monitor is not None:
@@ -233,6 +273,13 @@ async def run() -> None:
                 _cleanup_old_data()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("cleanup error: %s", exc)
+            # Automatic daily backup (cheap enabled-check, creates when due).
+            try:
+                from ..services.backup.auto import run_auto_backup_check
+
+                run_auto_backup_check()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("auto backup check error: %s", exc)
             last_cleanup = now
 
         # 3) Periodic story sync (respects its own interval).
@@ -310,8 +357,28 @@ async def run() -> None:
         else:
             consecutive_errors = 0
 
+        # Publish counters for the admin panel (best effort, every cycle).
+        try:
+            publish_status({
+                "running": True,
+                "paused": False,
+                "pid": os.getpid(),
+                "started_at": _worker_started_at,
+                "last_cycle_ts": _last_cycle_ts,
+                "consecutive_errors": consecutive_errors,
+            })
+        except Exception:
+            pass
+
         _write_heartbeat()  # also update after cycle completes
         _mark_cycle()
+        if restart_requested:
+            logger.warning("safe restart: draining and exiting (Docker restarts the worker)")
+            try:
+                await cm.shutdown_all()
+            except Exception:
+                pass
+            sys.exit(0)
         await asyncio.sleep(poll_interval)
 
 
