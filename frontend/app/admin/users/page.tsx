@@ -84,22 +84,26 @@ export default function AdminUsersPage() {
       title:
         kind === "delete"
           ? t("admin.users.deleteUser")
-          : kind === "block"
-            ? t("admin.users.block")
-            : kind === "logout"
-              ? t("admin.users.logoutAll")
-              : t("admin.users.clearQueue"),
+          : kind === "unblock"
+            ? t("admin.users.unblock")
+            : kind === "block"
+              ? t("admin.users.block")
+              : kind === "logout"
+                ? t("admin.users.logoutAll")
+                : t("admin.users.clearQueue"),
       message: kind === "delete" ? t("admin.users.deleteWarning") : undefined,
       requireText: kind === "delete" ? "DELETE" : undefined,
       confirmLabel:
         kind === "delete"
           ? t("admin.common.delete")
-          : kind === "block"
-            ? t("admin.users.block")
-            : kind === "logout"
-              ? t("admin.users.logoutAll")
-              : t("admin.users.clearQueue"),
-      danger: kind === "delete" || kind === "block",
+          : kind === "unblock"
+            ? t("admin.users.unblock")
+            : kind === "block"
+              ? t("admin.users.block")
+              : kind === "logout"
+                ? t("admin.users.logoutAll")
+                : t("admin.users.clearQueue"),
+      danger: kind === "delete",
       onConfirm: () => user && runAction(kind, user.id),
       onClose: () => setConfirmAction(null),
     };
