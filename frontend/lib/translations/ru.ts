@@ -450,7 +450,7 @@ const ru = {
 
   // TokenGate / Auth
   auth: {
-    storyWatcher: "StoryWatcher",
+    storyWatcher: "TGStory",
     registration: "Регистрация",
     loginToPanel: "Вход в панель",
     firstName: "Имя",

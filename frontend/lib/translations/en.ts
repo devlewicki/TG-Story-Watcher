@@ -450,7 +450,7 @@ const en = {
 
   // TokenGate / Auth
   auth: {
-    storyWatcher: "StoryWatcher",
+    storyWatcher: "TGStory",
     registration: "Registration",
     loginToPanel: "Login to panel",
     firstName: "First name",

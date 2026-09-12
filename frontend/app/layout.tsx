@@ -5,8 +5,8 @@ import { ShellGate } from "@/components/ShellGate";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "StoryWatcher",
-  description: "Automated Telegram Stories monitoring and viewing panel",
+  title: "TGStory — tgstory.space",
+  description: "Автоматический просмотр и мониторинг Telegram Stories — tgstory.space",
   icons: { icon: "/icon.svg" },
 };
 
