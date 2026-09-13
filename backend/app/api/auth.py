@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import AccountStatus, TelegramAccount
+from ..settings.new_user_defaults import apply_wiring_if_new_user
 from ..telegram import client_manager as cm
 from .deps import current_user_id
 from .schemas import AccountOut, account_out
@@ -125,6 +126,9 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
         account.last_name = getattr(me, "last_name", None) if me else None
         account.status = AccountStatus.ACTIVE.value
         db.commit()
+        # Fresh users (seeded at registration) get hashtag search enabled and
+        # monitoring auto-started right after their first Telegram authorization.
+        apply_wiring_if_new_user(db, user_id, account)
         # Remove the temp row's orphan session file only when the fresh login's
         # session was NOT adopted by the surviving row (otherwise we'd delete
         # the very session the merged account now uses).

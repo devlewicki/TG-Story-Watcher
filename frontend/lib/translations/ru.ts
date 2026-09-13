@@ -445,6 +445,10 @@ const ru = {
           includeBlocked: { label: "Заблокированные" },
         },
       },
+      additional: {
+        title: "Дополнительные настройки",
+        description: "API-параметры Telegram: обычно меняются только при переустановке приложения",
+      },
     },
   },
 

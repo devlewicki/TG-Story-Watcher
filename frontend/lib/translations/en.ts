@@ -445,6 +445,10 @@ const en = {
           includeBlocked: { label: "Blocked" },
         },
       },
+      additional: {
+        title: "Additional settings",
+        description: "Telegram API credentials: usually only change when reinstalling the app",
+      },
     },
   },
 
