@@ -39,9 +39,17 @@ logger = logging.getLogger("storywatcher.combined")
 HEARTBEAT_PATH = os.environ.get("WORKER_HEARTBEAT", "/tmp/worker_heartbeat")
 MAX_CONSECUTIVE_ERRORS = int(os.environ.get("WORKER_MAX_ERRORS", "10"))
 # Seconds the main loop may go without completing a cycle before the watchdog
-# kills the process so Docker restarts it. The queue sweep itself is fast;
-# long discovery runs happen as a background task, so a stall is a real hang.
-STALL_TIMEOUT = float(os.environ.get("WORKER_STALL_TIMEOUT", "240"))
+# kills the process so Docker restarts it. The queue sweep and story sync are
+# wrapped in their own timeouts (see ACCOUNT_DRAIN_TIMEOUT and SYNC_TIMEOUT),
+# so this is a safety net for a genuinely wedged loop rather than the primary
+# hang detector — it must be comfortably larger than those wraps.
+STALL_TIMEOUT = float(os.environ.get("WORKER_STALL_TIMEOUT", "900"))
+# Hard cap for one story-sync cycle. A sync legitimately spends time inside
+# Telegram SearchPosts flood-waits, but an unbounded sync wedges the whole
+# loop (queue draining waits for it) with no way to recover except a process
+# restart. Cancelling the overrun cycle keeps the loop alive; the next cycle
+# retries.
+SYNC_TIMEOUT = float(os.environ.get("WORKER_SYNC_TIMEOUT", "600"))
 LOG_STALL_EVERY = 60.0
 
 # A discovery cycle is supposed to finish (flood-waits included). If it runs
@@ -289,10 +297,17 @@ async def run() -> None:
                 logger.warning("auto backup check error: %s", exc)
             last_cleanup = now
 
-        # 3) Periodic story sync (respects its own interval).
+        # 3) Periodic story sync (respects its own interval). Bounded by
+        #    SYNC_TIMEOUT so a long flood-wait chain inside sync_account cannot
+        #    stall the whole loop; a cancelled cycle is retried next interval.
         if now - last_sync >= sync_interval:
             try:
-                await scheduler.run_once()
+                await asyncio.wait_for(scheduler.run_once(), timeout=SYNC_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.critical(
+                    "scheduler cycle overran %.0fs — cancelling to keep the main loop alive",
+                    SYNC_TIMEOUT,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("scheduler cycle error: %s", exc)
                 cycle_had_error = True

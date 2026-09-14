@@ -94,6 +94,10 @@ def _recover_stale_processing(
             item.started_at,
             item.attempts,
         )
+        # Consume one retry per recovery so a batch orphaned by repeated
+        # worker restarts is not recycled forever; once max_retries is spent
+        # the filter skips it and it stays for manual review (queue API).
+        item.attempts += 1
         item.status = "PENDING"
         item.started_at = None
         item.completed_at = None
@@ -240,6 +244,7 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
         """
         if item_db is None or item is None:
             return
+        item.attempts += 1
         if item.attempts >= max_auto_retries:
             item.status = "FAILED"
             item.error = f"{reason} (auto-retries exhausted: {item.attempts}/{max_auto_retries})"
