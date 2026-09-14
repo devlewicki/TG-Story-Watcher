@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 from telethon import errors, functions, types
@@ -58,6 +59,24 @@ def _connected(monitor: StoryMonitor) -> bool:
         return False
 
 
+# Flood-wait cooldown per account. stories.searchPosts is one of Telegram's
+# most aggressively rate-limited methods; once it floods, every subsequent
+# venue/hashtag in the same cycle hits the same cap. Instead of sleeping
+# ~30s per leftover entry (minutes of dead time per cycle), remember the
+# cooldown and abort the rest of the cycle, then re-try on a later cycle.
+_flood_cooldown_until: dict[int, float] = {}
+
+
+def _remember_flood(monitor: StoryMonitor, seconds: float) -> None:
+    """Record that this account is flood-limited for ``seconds`` more."""
+    _flood_cooldown_until[monitor.account.id] = time.monotonic() + max(float(seconds), 0.0)
+
+
+def _flood_pending(monitor: StoryMonitor) -> bool:
+    """True if the account is still inside a remembered flood cooldown."""
+    return time.monotonic() < _flood_cooldown_until.get(monitor.account.id, 0.0)
+
+
 def _geo_point_from_text(text: str) -> types.GeoPoint | None:
     """Parse a 'lat,long' string into a GeoPoint, or None if not coordinates."""
     text = text.strip()
@@ -92,6 +111,11 @@ async def search_hashtags(
         if not _connected(monitor):
             logger.info("discovery: client disconnected — aborting hashtag search")
             break
+        # Account is still inside a flood cooldown from an earlier search this
+        # (or a previous) cycle: skip the rest instead of re-hitting the cap.
+        if _flood_pending(monitor):
+            logger.info("discovery: flood cooldown active — aborting hashtag search")
+            break
         try:
             count = await _search_posts(monitor, hashtag=tag, limit=limit)
             processed += count
@@ -114,9 +138,11 @@ async def search_hashtags(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            # Wait out the flood before trying the next hashtag so the rest of
-            # the list still gets searched this cycle.
+            # Wait out the flood once, remember the cooldown, then stop this
+            # cycle — the remaining tags would only re-trigger the same cap.
+            _remember_flood(monitor, e.seconds)
             await asyncio.sleep(min(e.seconds, 30))
+            break
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery #%s failed: %s", tag, exc)
             activity.log(
@@ -147,6 +173,10 @@ async def search_locations(
         # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
         if not _connected(monitor):
             logger.info("discovery: client disconnected — aborting location search")
+            break
+        # Account is still inside a flood cooldown: skip the rest of the list.
+        if _flood_pending(monitor):
+            logger.info("discovery: flood cooldown active — aborting location search")
             break
         # Cities are resolved specially: try a collected venue with a matching
         # title first, otherwise fall back to a hashtag search with the city
@@ -186,9 +216,11 @@ async def search_locations(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            # Wait out the flood before trying the next location so the rest of
-            # the list still gets searched this cycle.
+            # Wait out the flood once, remember the cooldown, then stop this
+            # cycle — the remaining venues would only re-trigger the same cap.
+            _remember_flood(monitor, e.seconds)
             await asyncio.sleep(min(e.seconds, 30))
+            break
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery geo '%s' failed: %s", loc, exc)
             activity.log(
@@ -235,6 +267,7 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
                 return count
             except errors.FloodWaitError as e:
                 logger.warning("discovery geo '%s' flood wait %ss", city, e.seconds)
+                _remember_flood(monitor, e.seconds)
                 return 0
             except Exception as exc:  # noqa: BLE001
                 logger.warning("discovery geo '%s' via place failed: %s", city, exc)
@@ -255,6 +288,7 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
         return count
     except errors.FloodWaitError as e:
         logger.warning("discovery city '%s' flood wait %ss", city, e.seconds)
+        _remember_flood(monitor, e.seconds)
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.warning("discovery city '%s' hashtag search failed: %s", city, exc)

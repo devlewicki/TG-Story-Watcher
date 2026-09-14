@@ -235,6 +235,30 @@ _location_offset: dict[int, int] = {}
 # Round-robin pointer for geo-search venues: search a subset each cycle.
 _geo_venue_offset: dict[int, int] = {}
 
+# Cache of venues within a saved geo radius. The bbox+haversine scan is run
+# for every geo-enabled user on every discovery cycle; the result only changes
+# when the config or the collected places change, so memoise it briefly.
+_geo_radius_cache: dict[int, tuple[tuple[float, float, float], float, list[str]]] = {}
+GEO_RADIUS_CACHE_TTL = 600.0
+
+
+def _dedupe_locations(locations: list[str]) -> list[str]:
+    """Drop venues that appear more than once across manual/auto/geo lists.
+
+    Keeps the first occurrence (order preserved) and keys by venue id, so a
+    ``venue:4c45...`` coming from all three sources is searched exactly once.
+    Non-venue entries (``city:...``, bare titles, raw coords) are kept as-is.
+    """
+    seen_vids: set[str] = set()
+    deduped: list[str] = []
+    for loc in locations:
+        key = loc[len("venue:"):] if loc.startswith("venue:") else loc
+        if key in seen_vids:
+            continue
+        seen_vids.add(key)
+        deduped.append(loc)
+    return deduped
+
 
 def _compute_adaptive_search_params(db, user_id: int) -> dict:
     """Compute adaptive search interval and result count based on queue state.
@@ -471,18 +495,30 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             from ..models import GeoPlace
 
             auto_budget = max(1, int(cfg.get("searches_per_hour", 10)))
-            places = db.query(GeoPlace).order_by(GeoPlace.id).all()
+            # Fetch only the venue identifiers (the table grows unboundedly;
+            # pulling full ORM rows just to build a venue list is wasteful).
             existing_vids = {
                 l[len("venue:"):] for l in all_locations if l.startswith("venue:")
             }
-            auto = [
-                f"venue:{p.venue_id}"
-                for p in places
-                if p.venue_id and p.venue_id not in existing_vids
-            ]
+            if existing_vids:
+                place_vids = (
+                    db.query(GeoPlace.venue_id)
+                    .filter(~GeoPlace.venue_id.in_(existing_vids), GeoPlace.venue_id.isnot(None))
+                    .order_by(GeoPlace.id)
+                    .all()
+                )
+                auto = [r[0] for r in place_vids]
+            else:
+                place_vids = (
+                    db.query(GeoPlace.venue_id)
+                    .filter(GeoPlace.venue_id.isnot(None))
+                    .order_by(GeoPlace.id)
+                    .all()
+                )
+                auto = [r[0] for r in place_vids]
             if auto:
                 start = _auto_venue_offset.get(uid, 0) % len(auto)
-                auto_locations = (auto[start:] + auto[:start])[:auto_budget]
+                auto_locations = [f"venue:{vid}" for vid in auto[start:start + auto_budget]]
                 _auto_venue_offset[uid] = (start + auto_budget) % len(auto)
         # Rotate through manually-configured locations.
         if all_locations:
@@ -511,28 +547,35 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             c_lat = float(geo_lat)
             c_lng = float(geo_lng)
             c_radius = geo_radius
-            # Bounding box (fast pre-filter)
-            lat_margin = c_radius / 111.0 + 0.5
-            lng_margin = c_radius / (111.0 * math.cos(math.radians(c_lat))) + 0.5
-            candidates = (
-                db.query(GeoPlace)
-                .filter(
-                    GeoPlace.lat.isnot(None),
-                    GeoPlace.long.isnot(None),
-                    GeoPlace.lat >= c_lat - lat_margin,
-                    GeoPlace.lat <= c_lat + lat_margin,
-                    GeoPlace.long >= c_lng - lng_margin,
-                    GeoPlace.long <= c_lng + lng_margin,
+            geo_key = (c_lat, c_lng, c_radius)
+            cached = _geo_radius_cache.get(uid)
+            if cached and cached[0] == geo_key and (time.monotonic() - cached[1]) < GEO_RADIUS_CACHE_TTL:
+                geo_venues = cached[2]
+            else:
+                # Bounding box (fast pre-filter)
+                lat_margin = c_radius / 111.0 + 0.5
+                lng_margin = c_radius / (111.0 * math.cos(math.radians(c_lat))) + 0.5
+                candidates = (
+                    db.query(GeoPlace)
+                    .filter(
+                        GeoPlace.lat.isnot(None),
+                        GeoPlace.long.isnot(None),
+                        GeoPlace.lat >= c_lat - lat_margin,
+                        GeoPlace.lat <= c_lat + lat_margin,
+                        GeoPlace.long >= c_lng - lng_margin,
+                        GeoPlace.long <= c_lng + lng_margin,
+                    )
+                    .all()
                 )
-                .all()
-            )
-            for p in candidates:
-                dlat = math.radians(p.lat - c_lat)
-                dlng = math.radians(p.long - c_lng)
-                a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(c_lat)) * math.cos(math.radians(p.lat)) * math.sin(dlng / 2) ** 2
-                dist = _R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-                if dist <= c_radius and p.venue_id:
-                    geo_venues.append(f"venue:{p.venue_id}")
+                geo_venues = []
+                for p in candidates:
+                    dlat = math.radians(p.lat - c_lat)
+                    dlng = math.radians(p.long - c_lng)
+                    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(c_lat)) * math.cos(math.radians(p.lat)) * math.sin(dlng / 2) ** 2
+                    dist = _R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                    if dist <= c_radius and p.venue_id:
+                        geo_venues.append(f"venue:{p.venue_id}")
+                _geo_radius_cache[uid] = (geo_key, time.monotonic(), geo_venues)
             logger.info("geo-search: found %d venues within %.1fkm of (%.4f, %.4f)", len(geo_venues), c_radius, c_lat, c_lng)
 
         # Apply budget to geo venues: rotate through them in batches
@@ -546,6 +589,10 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             logger.info("geo-search: using %d/%d venues (budget=%d)", len(geo_venues), geo_budget, geo_budget)
 
         locations = manual_locations + auto_locations + geo_venues
+        # Deduplicate across the three sources: auto excludes manually-listed
+        # venues, but geo_venues overlaps with both, so one venue would
+        # otherwise be searched up to three times in a single cycle.
+        locations = _dedupe_locations(locations)
         # Geolocation first: it is the primary discovery mode and may be slow,
         # so big hashtag lists must not starve it.
         if locations:

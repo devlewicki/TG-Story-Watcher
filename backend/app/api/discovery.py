@@ -13,6 +13,9 @@ logger = logging.getLogger("storywatcher.api.discovery")
 router = APIRouter(prefix="/discovery", tags=["discovery"], dependencies=[Depends(require_api_token)])
 Db = Annotated[Session, Depends(get_db)]
 
+# Cap on how many venues a single /geo-search click may add to the config.
+GEO_SEARCH_ADD_MAX = 50
+
 
 class DiscoveryConfig(_BM):
     """Unified discovery config with all search modes."""
@@ -246,6 +249,11 @@ def run_geo_search(payload: GeoRadiusRequest, db: Db, user_id: Annotated[int, De
     venues = radius_result["places"]
     if not venues:
         raise HTTPException(400, "no collected venues found in this radius")
+    # Cap how many venues a single click may add to the config: an unbounded
+    # radius over a dense city would otherwise append hundreds/thousands of
+    # ``venue:`` lines and bloat every future discovery cycle. Pick the
+    # nearest ``GEO_SEARCH_ADD_MAX`` (results are already distance-sorted).
+    venues = venues[:GEO_SEARCH_ADD_MAX]
     svc = SettingsService(db, user_id)
     cfg = svc.get("discovery")
     venue_lines = [f"venue:{v['venue_id']}" for v in venues]
