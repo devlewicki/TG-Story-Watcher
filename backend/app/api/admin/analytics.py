@@ -7,7 +7,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-
 from ...admin_auth import current_admin
 from ...admin_models import AdminUser
 from ...db import get_db
@@ -35,7 +34,10 @@ def system_analytics(
     hours = _PERIODS_HOURS[period]
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     day_bucket = (
-        func.date_trunc("day", StoryView.viewed_at)
+        func.date_trunc(
+            "day",
+            StoryView.viewed_at.op("AT TIME ZONE")("Europe/Moscow"),
+        )
         if str(db.bind.url).startswith("postgresql")
         else func.date(StoryView.viewed_at)
     )

@@ -57,16 +57,6 @@ function useSections(): Record<string, SectionDef> {
             { value: "en", label: "English" },
           ],
         },
-        timezone: {
-          label: t("settings.sections.general.fields.timezone.label"),
-          description: t("settings.sections.general.fields.timezone.description"),
-          type: "text",
-          command: {
-            label: t("settings.sections.general.fields.timezone.autoDetect"),
-            detect: () =>
-              Intl.DateTimeFormat().resolvedOptions().timeZone ?? "",
-          },
-        },
         autostart: {
           label: t("settings.sections.general.fields.autostart.label"),
           description: t("settings.sections.general.fields.autostart.description"),

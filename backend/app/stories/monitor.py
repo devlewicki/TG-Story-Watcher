@@ -344,17 +344,11 @@ class StoryMonitor:
         max_delay = view_cfg.get("max_delay", 120)
 
         # Check per-user daily story limit for this Telegram account.
+        # Day boundary is always Moscow time (app-wide policy).
+        from ..api.timezone import user_today
         max_per_user = int(view_cfg.get("max_stories_per_user_per_day", 3))
         if max_per_user > 0:
-            from zoneinfo import ZoneInfo
-            tz_name = s.get("general").get("timezone", "UTC")
-            try:
-                user_tz = ZoneInfo(tz_name)
-            except Exception:
-                user_tz = ZoneInfo("UTC")
-            local_now = datetime.now(timezone.utc).astimezone(user_tz)
-            day_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-            day_start_utc = day_start_local.astimezone(timezone.utc)
+            day_start_utc = user_today(self.db, self.account.user_id)
             viewed_today = (
                 self.db.query(StoryView)
                 .join(TelegramAccount, StoryView.account_id == TelegramAccount.id)

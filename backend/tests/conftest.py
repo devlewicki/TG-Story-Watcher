@@ -152,10 +152,14 @@ def seed_views(db, seed_accounts, seed_stories):
     story_views has UNIQUE(account_id, peer_id, telegram_story_id), so each
     view must be from a unique account for the same peer/story combo.  We use
     both accounts and create one extra view from the second account for story 0.
+
+    Views are anchored to the start of the current Moscow day (app-wide
+    timezone policy) so "today" counters stay deterministic at any run hour.
     """
-    now = datetime.now(timezone.utc)
+    from app.api.timezone import user_today
+
+    today = user_today(db, seed_accounts[0].user_id)
     views = []
-    # View first 10 stories, alternating accounts
     for i in range(10):
         sv = StoryView(
             account_id=seed_accounts[i % 2].id,
@@ -163,7 +167,7 @@ def seed_views(db, seed_accounts, seed_stories):
             peer_id=seed_stories[i].peer_id,
             telegram_story_id=seed_stories[i].telegram_story_id,
             source="monitor",
-            viewed_at=now - timedelta(hours=i),
+            viewed_at=today + timedelta(minutes=10 + i * 30),
             status="VIEWED",
         )
         db.add(sv)
@@ -176,7 +180,7 @@ def seed_views(db, seed_accounts, seed_stories):
         peer_id=seed_stories[0].peer_id,
         telegram_story_id=seed_stories[0].telegram_story_id,
         source="monitor",
-        viewed_at=now - timedelta(minutes=50),
+        viewed_at=today + timedelta(minutes=5),
         status="VIEWED",
     )
     db.add(sv)

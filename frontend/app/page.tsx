@@ -46,7 +46,7 @@ export default function DashboardPage() {
     count: h.count,
   }));
   const dayData = data.charts.views_by_day.map((d) => ({
-    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short" }),
+    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short", timeZone: "Europe/Moscow" }),
     count: d.count,
   }));
 

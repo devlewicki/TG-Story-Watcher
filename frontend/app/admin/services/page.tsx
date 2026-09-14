@@ -61,7 +61,7 @@ export default function AdminServicesPage() {
               <Td className="text-xs text-slate-400">
                 {s.uptime_seconds != null ? `${Math.floor(s.uptime_seconds / 3600)}h ${Math.floor((s.uptime_seconds % 3600) / 60)}m` : "—"}
               </Td>
-              <Td className="text-xs text-slate-400">{s.last_check ? new Date(s.last_check).toLocaleTimeString() : "—"}</Td>
+              <Td className="text-xs text-slate-400">{s.last_check ? new Date(s.last_check).toLocaleTimeString([], { timeZone: "Europe/Moscow" }) : "—"}</Td>
             </tr>
           ))}
         </AdminTable>

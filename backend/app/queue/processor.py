@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 from telethon import errors
@@ -81,13 +80,9 @@ async def process_queue_item(
         view_cfg = SettingsService(db, account.user_id).get("view")
         max_per_user = int(view_cfg.get("max_stories_per_user_per_day", 3))
         if max_per_user > 0:
-            tz_name = SettingsService(db, account.user_id).get("general").get("timezone", "UTC")
-            try:
-                user_tz = ZoneInfo(tz_name)
-            except Exception:
-                user_tz = ZoneInfo("UTC")
-            local_now = _now().astimezone(user_tz)
-            day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+            # Day boundary is always Moscow time (app-wide policy).
+            from ..api.timezone import user_today
+            day_start = user_today(db, account.user_id)
             viewed_today = (
                 db.query(StoryView)
                 .join(TelegramAccount, StoryView.account_id == TelegramAccount.id)

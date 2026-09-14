@@ -11,7 +11,7 @@ type SettingsData = {
 };
 
 const SECTION_LABELS: Record<string, Record<string, string>> = {
-  general: { language: "Language", timezone: "Timezone", theme: "Theme", autostart: "Autostart" },
+  general: { language: "Language", theme: "Theme", autostart: "Autostart" },
   telegram: { api_id: "API ID", api_hash: "API hash", reconnect: "Reconnect" },
   monitoring: { check_interval: "Check interval (s)", realtime: "Realtime", resync: "Resync" },
   queue: { max_tasks: "Max tasks", parallel: "Parallel", backoff_factor: "Backoff factor", processing_timeout: "Timeout (s)", max_auto_retries: "Max retries" },
@@ -89,7 +89,7 @@ export default function AdminSettingsPage() {
                 }
               />
               <div className="space-y-2 p-4">
-                {Object.entries(values).map(([key, value]) => (
+                {Object.entries(values).filter(([key]) => key !== "timezone").map(([key, value]) => (
                   <div key={key} className="flex items-center justify-between gap-3 text-sm">
                     <span className="text-slate-500 dark:text-slate-400">{SECTION_LABELS[section]?.[key] || key}</span>
                     {typeof value === "boolean" ? (

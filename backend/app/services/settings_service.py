@@ -71,7 +71,7 @@ def compute_all_from_daily(daily: int) -> dict:
 
 class SettingsService:
     DEFAULTS={
-        "general": {"language": "en", "timezone": "UTC", "theme": "dark", "autostart": True},
+        "general": {"language": "en", "timezone": "Europe/Moscow", "theme": "dark", "autostart": True},
         "telegram": {"api_id": None, "api_hash": None, "reconnect": True},
         "monitoring": {"check_interval": 30, "realtime": True, "resync": True},
         "queue": {"max_tasks": 50, "parallel": 1, "backoff_factor": 2.0, "processing_timeout": 300, "max_auto_retries": 3},
