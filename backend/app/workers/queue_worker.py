@@ -5,6 +5,10 @@ The worker runs in its own process (the ``worker`` compose service), polls for
 due queue items, and invokes :func:`app.queue.processor.process_queue_item` on
 each. A companion scheduler (``app.workers.scheduler``) drives the periodic
 fetch of available stories.
+
+Multiple accounts are drained concurrently (see ``ACCOUNT_DRAIN_PARALLEL``);
+each account owns its own Telethon client and SQLite session file, so the
+only shared resource is the VPN proxy, which is why the concurrency is capped.
 """
 from __future__ import annotations
 
@@ -159,6 +163,10 @@ def _claim_due_items(db: Session, account_id: int, max_items: int) -> Sequence[S
 
 ACCOUNT_CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
 ACCOUNT_DRAIN_TIMEOUT = 300  # seconds to wait for full drain_queue per account
+# How many accounts may be drained at the same time. The VPN proxy is shared
+# across every account, so an unbounded fan-out could trip Telegram IP-level
+# rate limits; 5 keeps throughput high while staying under that threshold.
+ACCOUNT_DRAIN_PARALLEL = int(os.environ.get("WORKER_ACCOUNT_PARALLEL", "5"))
 
 
 async def drain_queue(db: Session, account: TelegramAccount) -> int:
@@ -323,11 +331,107 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
     return processed_count
 
 
+async def _drain_account(db: Session, account: TelegramAccount) -> int:
+    """Recover stale items and drain one account's queue, with retries.
+
+    Returns the number of items successfully viewed.  Extracted from
+    ``run_once`` so accounts can be drained concurrently (each account holds
+    its own Telethon client and SQLite session file, so no resources are
+    shared between them).
+    """
+    # Recover items stuck in PROCESSING (worker crash/hang) so they
+    # don't block the queue forever. Runs here — for every candidate
+    # account before draining — so a wedged drain cannot swallow the
+    # recovery step (K-01).
+    qcfg = SettingsService(db, account.user_id).get("queue")
+    _recover_stale_processing(
+        db,
+        account.id,
+        timeout_s=int(qcfg.get("processing_timeout", 300)),
+        max_retries=int(qcfg.get("max_auto_retries", 3)),
+    )
+    for _attempt in range(3):
+        try:
+            processed = await asyncio.wait_for(drain_queue(db, account), timeout=ACCOUNT_DRAIN_TIMEOUT)
+            # drain_queue may legitimately leave the account limited
+            # (daily budget exhausted -> PAUSED, hourly budget / flood wait
+            # -> FLOOD_WAIT). Don't overwrite those states back to ACTIVE.
+            if account.status not in (
+                AccountStatus.PAUSED.value,
+                AccountStatus.FLOOD_WAIT.value,
+                AccountStatus.AUTH_REQUIRED.value,
+                AccountStatus.BANNED_OR_RESTRICTED.value,
+            ):
+                account.status = AccountStatus.ACTIVE.value
+            db.commit()
+            return processed
+        except Exception as exc:  # noqa: BLE001
+            is_locked = "database is locked" in str(exc).lower()
+            if is_locked and _attempt < 2:
+                logger.warning("drain_queue(%s) database locked, retrying (attempt %d)", account.id, _attempt + 1)
+                db.rollback()
+                await asyncio.sleep(2 ** _attempt)
+                continue
+            # AuthKey duplicated: VPN IP changed — session is permanently
+            # invalidated.  Delete the session file and mark AUTH_REQUIRED.
+            is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
+            if is_auth_dup:
+                logger.error("drain_queue(%s) AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
+                db.rollback()
+                try:
+                    await cm.drop_client(account.id)
+                except Exception:
+                    pass
+                # Re-open a fresh session to update the account status.
+                db2 = SessionLocal()
+                try:
+                    acc2 = db2.get(TelegramAccount, account.id)
+                    if acc2 is not None:
+                        acc2.status = AccountStatus.AUTH_REQUIRED.value
+                        acc2.monitoring = False
+                        if acc2.session_path and os.path.isfile(acc2.session_path):
+                            try:
+                                os.remove(acc2.session_path)
+                            except OSError:
+                                pass
+                        acc2.session_path = None
+                    db2.commit()
+                except Exception:
+                    db2.rollback()
+                finally:
+                    db2.close()
+                return 0
+            # Connection errors: try a full reconnect before giving up.
+            is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
+            if is_conn and _attempt < 2:
+                logger.warning("drain_queue(%s) connection error, reconnecting (attempt %d): %s", account.id, _attempt + 1, exc)
+                db.rollback()
+                try:
+                    await cm.reconnect(account)
+                except Exception:
+                    logger.debug("reconnect for account %s failed", account.id, exc_info=True)
+                await asyncio.sleep(2 ** _attempt)
+                continue
+            logger.error("drain_queue(%s) failed: %s", account.id, exc)
+            account.status = AccountStatus.ERROR.value
+            activity.log(
+                f"worker drain failed: {exc}",
+                event_type="worker_error",
+                level="ERROR",
+                account_id=account.id,
+                db=db,
+            )
+            db.commit()
+            return 0
+    return 0
+
+
 async def run_once() -> int:
     """Single worker sweep across all accounts. Returns number of processed items."""
-    # Read the candidate list with a short-lived session, then give each account
-    # its own dedicated session so status updates / commits never leak dirty
-    # state from one account into the next (see C-01 / H-13).
+    # Read the candidate list with a short-lived session. Each account is then
+    # drained concurrently (up to ACCOUNT_DRAIN_PARALLEL at once) in its own
+    # dedicated session so status updates / commits never leak dirty state from
+    # one account into the next (see C-01 / H-13).
     ids = []
     read_db = SessionLocal()
     try:
@@ -344,106 +448,29 @@ async def run_once() -> int:
     finally:
         read_db.close()
 
-    total = 0
-    for account_id in ids:
-        db = SessionLocal()
-        try:
-            account = db.get(TelegramAccount, account_id)
-            if account is None:
-                continue
-            if account.status in (
-                AccountStatus.AUTH_REQUIRED.value,
-                AccountStatus.BANNED_OR_RESTRICTED.value,
-            ):
-                continue
-            # Recover items stuck in PROCESSING (worker crash/hang) so they
-            # don't block the queue forever. Runs here — for every candidate
-            # account before draining — so a wedged drain cannot swallow the
-            # recovery step (K-01).
-            qcfg = SettingsService(db, account.user_id).get("queue")
-            _recover_stale_processing(
-                db,
-                account.id,
-                timeout_s=int(qcfg.get("processing_timeout", 300)),
-                max_retries=int(qcfg.get("max_auto_retries", 3)),
-            )
-            for _attempt in range(3):
-                try:
-                    processed = await asyncio.wait_for(drain_queue(db, account), timeout=ACCOUNT_DRAIN_TIMEOUT)
-                    total += processed
-                    # drain_queue may legitimately leave the account limited
-                    # (daily budget exhausted -> PAUSED, hourly budget / flood wait
-                    # -> FLOOD_WAIT). Don't overwrite those states back to ACTIVE.
-                    if account.status not in (
-                        AccountStatus.PAUSED.value,
-                        AccountStatus.FLOOD_WAIT.value,
-                        AccountStatus.AUTH_REQUIRED.value,
-                        AccountStatus.BANNED_OR_RESTRICTED.value,
-                    ):
-                        account.status = AccountStatus.ACTIVE.value
-                    db.commit()
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    is_locked = "database is locked" in str(exc).lower()
-                    if is_locked and _attempt < 2:
-                        logger.warning("drain_queue(%s) database locked, retrying (attempt %d)", account.id, _attempt + 1)
-                        db.rollback()
-                        await asyncio.sleep(2 ** _attempt)
-                        continue
-                    # AuthKey duplicated: VPN IP changed — session is permanently
-                    # invalidated.  Delete the session file and mark AUTH_REQUIRED.
-                    is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
-                    if is_auth_dup:
-                        logger.error("drain_queue(%s) AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
-                        db.rollback()
-                        try:
-                            await cm.drop_client(account.id)
-                        except Exception:
-                            pass
-                        # Re-open a fresh session to update the account status.
-                        db2 = SessionLocal()
-                        try:
-                            acc2 = db2.get(TelegramAccount, account.id)
-                            if acc2 is not None:
-                                acc2.status = AccountStatus.AUTH_REQUIRED.value
-                                acc2.monitoring = False
-                                if acc2.session_path and os.path.isfile(acc2.session_path):
-                                    try:
-                                        os.remove(acc2.session_path)
-                                    except OSError:
-                                        pass
-                                acc2.session_path = None
-                            db2.commit()
-                        except Exception:
-                            db2.rollback()
-                        finally:
-                            db2.close()
-                        break
-                    # Connection errors: try a full reconnect before giving up.
-                    is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
-                    if is_conn and _attempt < 2:
-                        logger.warning("drain_queue(%s) connection error, reconnecting (attempt %d): %s", account.id, _attempt + 1, exc)
-                        db.rollback()
-                        try:
-                            await cm.reconnect(account)
-                        except Exception:
-                            logger.debug("reconnect for account %s failed", account.id, exc_info=True)
-                        await asyncio.sleep(2 ** _attempt)
-                        continue
-                    logger.error("drain_queue(%s) failed: %s", account.id, exc)
-                    account.status = AccountStatus.ERROR.value
-                    activity.log(
-                        f"worker drain failed: {exc}",
-                        event_type="worker_error",
-                        level="ERROR",
-                        account_id=account.id,
-                        db=db,
-                    )
-                    db.commit()
-                    break
-        finally:
-            db.close()
-    return total
+    if not ids:
+        return 0
+
+    sem = asyncio.Semaphore(ACCOUNT_DRAIN_PARALLEL)
+
+    async def _guarded(account_id: int) -> int:
+        async with sem:
+            db = SessionLocal()
+            try:
+                account = db.get(TelegramAccount, account_id)
+                if account is None:
+                    return 0
+                if account.status in (
+                    AccountStatus.AUTH_REQUIRED.value,
+                    AccountStatus.BANNED_OR_RESTRICTED.value,
+                ):
+                    return 0
+                return await _drain_account(db, account)
+            finally:
+                db.close()
+
+    results = await asyncio.gather(*(_guarded(aid) for aid in ids))
+    return sum(r for r in results if isinstance(r, int))
 
 
 async def run_forever(interval: float = 1.0) -> None:
