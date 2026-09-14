@@ -1,6 +1,7 @@
 """Admin: user management."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -15,6 +16,7 @@ from ...db import get_db
 from ...models import (
     ActivityLog,
     AutomationRule,
+    SettingsStore,
     Story,
     StoryQueue,
     StoryView,
@@ -23,6 +25,7 @@ from ...models import (
 )
 from ...services import admin_audit
 from ...multitenancy import revoke_user_tokens
+from ...telegram import client_manager as cm
 
 router = APIRouter(tags=["admin-users"])
 Db = Annotated[Session, Depends(get_db)]
@@ -263,7 +266,7 @@ def clear_user_queue(
 
 
 @router.delete("/users/{user_id}")
-def delete_user(
+async def delete_user(
     user_id: int,
     request: Request,
     db: Db,
@@ -272,6 +275,7 @@ def delete_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(404, "user not found")
+    accounts = db.query(TelegramAccount).filter(TelegramAccount.user_id == user_id).all()
     admin_audit.audit(
         admin_id=admin.id,
         admin_username=admin.username,
@@ -280,6 +284,35 @@ def delete_user(
         ip=client_ip(request),
         metadata={"email": user.email},
     )
+    # Release Telegram resources BEFORE removing the rows so that a later login
+    # with the same phone starts from a clean slate. Without this, the cached
+    # TelegramClient stays connected (in this process and in the worker), the
+    # session file lingers, and in-memory login state left by the deleted user
+    # is reused by the same number -> Telethon sends auth.resendCode, which
+    # Telegram rejects with SEND_CODE_UNAVAILABLE ("failed to send code").
+    for acc in accounts:
+        try:
+            await cm.drop_client(acc.id)
+        except Exception:
+            pass
+        if acc.session_path:
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                try:
+                    os.remove(acc.session_path + suffix)
+                except FileNotFoundError:
+                    pass
+        if acc.phone:
+            try:
+                await cm.clear_login_state(acc.phone)
+            except Exception:
+                pass
+    # Invalidate existing tokens and drop per-user settings rows (the revoked-at
+    # marker is kept so a leaked token of the deleted user stays invalid).
+    revoke_user_tokens(user_id)
+    db.query(SettingsStore).filter(
+        SettingsStore.key.like(f"user:{user_id}:%"),
+        SettingsStore.key != f"user:{user_id}:token_revoked_at",
+    ).delete(synchronize_session=False)
     db.delete(user)  # CASCADE removes accounts, stories, queue...
     db.commit()
     return {"ok": True}

@@ -92,6 +92,8 @@ const en = {
     reloginDesc: "The Telegram session expired due to an IP address change. Enter the confirmation code to restore.",
     reloginButton: "Restore session",
     sendingCode: "Sending code…",
+    sendCodeCountdown: "Resend ({seconds}s)",
+    codeSentNotice: "Code sent. Resend will be available in {seconds} seconds.",
   },
 
   // Stories

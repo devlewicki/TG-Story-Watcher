@@ -60,7 +60,11 @@ accounts, tags, search settings, rules, queues, history, and analytics.
 - **Account dashboard** with charts and recent activity
 - **Account analytics** — own active/archived Stories, views, reactions, forwards,
   ER, viewer lists, time-based snapshots, best Stories, period filters
-- **Responsive web UI** with dark/light theme and EN/RU translations
+- **Responsive web UI** with a dark theme and EN/RU translations
+- **Quick start** — new users receive starter hashtags; auto-search and
+  monitoring turn on automatically once Telegram is connected
+- **Admin panel** — global management of users, accounts, the worker, and
+  backups with roles (SUPER_ADMIN/ADMIN/READ_ONLY)
 - **VPN proxy support** — built-in Xray SOCKS5 proxy for Telegram MTProto
   with subscription-based server management, automatic failover, and IP
   change monitoring
@@ -101,6 +105,7 @@ FastAPI backend ─────────► PostgreSQL (data) + Redis (cache)
    │   ├── Scheduler (story sync, analytics collection)
    │   ├── View queue (delays, rate limits, task recovery)
    │   ├── Discovery controller (adaptive search, geo/hashtag rotation)
+   │   ├── Auto-backup and stale-data cleanup
    │   └── VPN IP monitor (detects IP changes → reconnects Telegram clients)
    │
    └── VPN container (Xray SOCKS5)
@@ -151,10 +156,11 @@ The entire system revolves around **one** user parameter — "Views per day":
 | Views per minute | `ceil(daily / 1440)` | 9 |
 | Min delay | `max(3, min(20, avg_delay × 0.3))` | 3s |
 | Max delay | `max(10, min(120, avg_delay × 1.5))` | 11s |
-| Queue parallelism | based on daily limit (1–4, hard cap 4) | 3 |
+| Queue parallelism | based on daily limit (1–3) | 3 |
+| Max tasks per cycle | based on daily limit (50–200) | 200 |
 | Monitoring interval | `max(15, min(60, 120 - daily/100))` | 15s |
 | Search interval | adaptive, based on queue fill | 60–600s |
-| Search results | adaptive, based on queue gap | 10–200 |
+| Search results | adaptive, based on queue gap | 20–200 |
 
 > `parallel` and `max_tasks` are additionally clamped by hard caps in the
 > worker so the DB connection pool can never be exhausted and the event loop
@@ -268,7 +274,7 @@ Containers:
 | `vpn` | Xray SOCKS5 proxy (vmess/vless/shadowsocks/trojan) with auto-failover |
 | `postgres` | PostgreSQL 16 database |
 | `redis` | Redis 7 cache |
-| `backend` | FastAPI REST API (port 9000, internal only) |
+| `backend` | FastAPI REST API (host 9000 → container 8000) |
 | `worker` | Single background process: sync + queue + analytics + discovery + VPN monitor |
 | `frontend` | Next.js SSR web UI (port 3000, internal only) |
 | `nginx` | Reverse proxy, exposes external port 8081 |
@@ -280,8 +286,8 @@ git pull
 docker compose up -d --build
 ```
 
-Data (PostgreSQL `postgres_data` volume and Telegram sessions `sessions_data`
-volume) survives rebuilds.
+Data (PostgreSQL `postgres_data` volume, Telegram sessions `sessions_data`
+volume, and backups `backups_data` volume) survives rebuilds.
 
 ### Stopping & Wiping
 
@@ -373,7 +379,7 @@ containers. A ready-to-copy template is `.env.example`.
 | `APP_NAME` | `StoryWatcher` | Application name (display only) |
 | `SECRET_KEY` | `dev-secret-key` | App secret key (signs user tokens); **change it** |
 | `DEBUG` | `false` | Debug mode (verbose logging) |
-| `STORYWATCHER_API_TOKEN` | — | API token protecting the panel; sent by the frontend in the `X-API-Token` header |
+| `STORYWATCHER_API_TOKEN` | — | Legacy API key (not used for authentication; included in the backup secrets snapshot) |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:9000/api` | Frontend API base URL (set to `/api` in Docker via Nginx) |
 
 ### Telegram
@@ -410,10 +416,9 @@ containers. A ready-to-copy template is `.env.example`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TELEGRAM_PROXY_ENABLED` | `false` | Enable MTProto proxy for Telegram |
-| `TELEGRAM_PROXY_HOST` | `vpn` | MTProto proxy host (container name) |
-| `TELEGRAM_PROXY_PORT` | `1080` | MTProto proxy port |
-| `TELEGRAM_PROXY_SECRET` | — | MTProto proxy secret |
+| `TELEGRAM_PROXY_ENABLED` | `false` | Enable VPN SOCKS5 proxy for Telegram |
+| `TELEGRAM_PROXY_HOST` | `vpn` | SOCKS5 proxy host (container name) |
+| `TELEGRAM_PROXY_PORT` | `1080` | SOCKS5 proxy port |
 | `VPN_SUBSCRIPTION_URL` | — | V2Ray subscription URL for the VPN container |
 | `VPN_REFRESH_INTERVAL` | `3600` | How often to re-fetch the subscription (seconds) |
 | `VPN_SOCKS_PORT` | `1080` | SOCKS5 port exposed by the VPN container |
@@ -424,12 +429,25 @@ containers. A ready-to-copy template is `.env.example`.
 | `VPN_FAIL_THRESHOLD` | `3` | Consecutive probe failures before failover |
 | `VPN_SCAN_PORT` | `1081` | Dedicated port for candidate scanning (avoids dropping the live proxy) |
 | `VPN_SCAN_SLEEP` | `1.0` | Delay between scan probes (seconds) |
-| `VPN_SCAN_ATTEMPTS` | `2` | Probe attempts per candidate during scan |
+| `VPN_SCAN_ATTEMPTS` | `1` | Probe attempts per candidate during scan |
 | `VPN_IP_CHECK_INTERVAL` | `30` | How often the VPN IP monitor checks for IP changes (seconds) |
+
+### Administration & Backups
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_BOOTSTRAP_USERNAME` | `admin` | First admin login (created on startup) |
+| `ADMIN_BOOTSTRAP_PASSWORD` | — | First admin password |
+| `BACKUP_STORAGE_DIR` | `/data/backups` | Backup storage directory (volume `backups_data`) |
+| `BACKUP_AUTO_PASSWORD` | — | Encryption password for automatic backups |
+| `BACKUP_SNAPSHOT_SECRETS` | `1` | Include secrets (`.env`, sessions) in the backup snapshot |
+| `WORKER_DISCOVERY_TIMEOUT` | `1200` | Timeout for one discovery cycle in the worker (seconds) |
+| `STORYWATCHER_GEOCODER_URL` | `https://nominatim.openstreetmap.org` | Geocoder for address search |
+| `PROBE_INTERNAL_SERVICES` | `0` | Probe internal services (frontend/nginx) in the admin panel |
 
 ### Production Security
 
-- Change `SECRET_KEY` and `STORYWATCHER_API_TOKEN` — rotating `SECRET_KEY`
+- Change `SECRET_KEY` — rotating `SECRET_KEY`
   signs out all users (their session tokens are signed with it).
 - Set a strong `POSTGRES_PASSWORD`.
 - Never commit `.env`, session files, or `node_modules` (covered by `.gitignore`).
@@ -439,52 +457,70 @@ containers. A ready-to-copy template is `.env.example`.
 ## Usage
 
 1. **Register.** Open the app → sign up with name, email, and password.
-2. **Log in.** Enter your email and password.
-3. **Connect Telegram.** Accounts → Add account → enter your phone number →
-   enter the code from Telegram → enter 2FA password if prompted.
-4. **Verify.** The account card shows your name, username, phone, and Telegram ID.
-5. **Configure.** Set "Views per day" in Settings → Limits. All other
-   parameters (delays, search frequency, queue parallelism) are auto-computed.
-6. **Add sources.** Story Search → add hashtags, places, or enable geo-radius search.
-7. **Monitor.** Toggle monitoring ON for connected accounts — the worker
-   discovers and views Stories automatically.
-8. **Analyze.** The Analytics page shows views, reactions, forwards, ER, and
-   viewer lists for your own Stories.
-9. **Manage.** Use Whitelist/Blacklist to control which authors are processed;
+2. **Connect Telegram.** Right after registration the Telegram connection dialog
+   opens: phone number → code from Telegram → 2FA password if prompted. You can
+   also connect later (Accounts → Add account). The account card shows your name,
+   username, phone, and Telegram ID.
+3. **Automatic setup.** For a new user, connecting Telegram automatically enables
+   monitoring and auto-search, and Story Search is pre-filled with starter
+   hashtags. Existing users' settings are not touched.
+4. **Configure.** Set "Views per day" in Settings → Limits. All other parameters
+   (delays, search frequency, queue parallelism) are auto-computed.
+5. **Add sources.** Story Search → add hashtags, places & cities, or enable a
+   geo-radius search around a point on the map.
+6. **Filters.** Settings → Filters controls which authors are processed
+   (contacts, channels, groups, bots, etc.).
+7. **Analyze.** The Analytics page shows views, reactions, forwards, ER, and
+   viewer lists for your own Stories; Statistics aggregates actions.
+8. **Manage.** Use Whitelist/Blacklist to control which authors are processed;
    use Queue to track, cancel, or retry view tasks.
+9. **Extras.** Settings → Additional settings holds the Telegram API ID and
+   API hash (usually changed only after reinstalling the app).
 
 > A Telegram account belongs to the application user who authorizes it.
 > The same Telegram account cannot be attached to another application user.
 
 ## Settings Reference
 
+Settings are managed on the Settings page. The "Queue" and "Discovery"
+sections are not edited there: the queue is fully automatic, and search is
+configured on its own Story Search page.
+
 ### User-Configured Parameters
 
 | Section | Parameter | Range | Description |
 |---|---|---|---|
-| Limits | Views per day | 50–12,000 | Maximum views per 24 hours |
+| General | Language | RU / EN | Interface localization |
+| General | Timezone | tz identifier | e.g. `Europe/Moscow`, `UTC`; auto-detect available |
+| General | Autostart | on/off | Start automation when the application launches |
+| Telegram | Reconnection | on/off | Auto-reconnect when the connection drops |
+| Monitoring | Real-time updates | on/off | Process updates as they arrive |
+| Monitoring | Fallback sync | on/off | Restore missed stories after a restart |
+| Limits | Views per day | 50–12,000 | Main parameter; everything else derives from it |
+| View | Max stories per author per day | 1–10 | Newest first; resets at 00:00 in your timezone |
 | View | Auto-like | on/off | Add a reaction after viewing |
 | View | Like emoji | 👍 ❤️ 🔥 etc. | Emoji for auto-reactions |
-| Discovery | Auto search | on/off | Enable automatic story search |
-| Discovery | Hashtags | text | Tags to search for |
-| Discovery | Places & cities | text | Locations to search |
-| Discovery | Geo-radius | map | Search within a radius |
-| Monitoring | Check interval / realtime | — | How often to check for new Stories |
-| Queue | Retries / timeouts | — | Auto-retry after failures and limits |
-| App | Language, theme | EN/RU, dark/light | Localization and theming |
+| Filters | Which authors to process | 9 toggles | Contacts, unknown, mutual/non-mutual, channels, groups, bots, deleted, blocked |
+| Additional | API ID, API Hash | text | Telegram API credentials from my.telegram.org |
 
 ### Auto-Computed Parameters (not editable)
 
-| Section | Parameter | Derived from |
+| Section | Parameter | Formula |
 |---|---|---|
-| Limits | Views per hour | Views per day / 24 |
-| Limits | Views per minute | Views per day / 1440 |
-| View | Min delay | Views per day (uniform distribution) |
-| View | Max delay | Views per day (uniform distribution) |
-| Queue | Parallel workers | Views per day (1–4) |
-| Monitoring | Check interval | Views per day (15–60s) |
-| Discovery | Search interval | Queue state (adaptive) |
-| Discovery | Results per search | Queue gap (adaptive) |
+| Limits | Views per hour | `floor(daily / 24)` |
+| Limits | Views per minute | `ceil(daily / 1440)` |
+| Limits | Searches per hour | 1–10 (`daily / 1500`) |
+| Limits | Max search results | 20–200 |
+| Limits | Search delay | 60–600s |
+| View | Min delay | 3–20s (avg delay × 0.3) |
+| View | Max delay | 10–120s (avg delay × 1.5) |
+| Queue | Parallel processing | 1–3 (by daily limit) |
+| Queue | Max tasks per cycle | 50–200 |
+| Queue | Processing timeout | 300/600s |
+| Queue | Auto retries | 3/5 |
+| Monitoring | Check interval | 15–60s (`120 − daily / 100`) |
+| Discovery | Search interval | 60–600s (by queue fill) |
+| Discovery | Results per search | 20–200 (by queue gap) |
 
 ## Account & Queue Statuses
 
@@ -493,8 +529,10 @@ limit is reached), `FLOOD_WAIT` — Telegram rate-limited (auto-pause),
 `ERROR` — error, `DISCONNECTED` — needs reconnect, `AUTH_REQUIRED` — needs
 authorization, `BANNED_OR_RESTRICTED` — restricted by Telegram.
 
-**Queue:** `PENDING` — waiting, `PROCESSING` — in flight, `VIEWED` — viewed,
-`SKIPPED` — skipped, `FAILED` — errored (retry via API), `CANCELLED` — cancelled.
+**Queue:** `PENDING` — waiting, `WAITING_DELAY` — waiting for the pre-view delay,
+`PROCESSING` — in flight, `VIEWED` — viewed, `SKIPPED` — skipped,
+`FAILED` — errored (retry via API), `EXPIRED` — story expired,
+`CANCELLED` — cancelled.
 
 Tasks "stuck" in `PROCESSING` (after a worker crash/restart) are recovered
 automatically: first returned to `PENDING` and retried; when the auto-retry
@@ -597,11 +635,19 @@ The VPN container will be included automatically in the compose stack.
 - Telegram auth endpoints (`/api/auth/*`) require a valid user token
 - Account, stories, queue, analytics, and settings endpoints all require
   authentication via the `X-API-Token` header
-- Health check (`/api/health`) is the only unauthenticated endpoint
+- The admin panel (`/api/admin/*`) uses a separate `x-admin-token` header with
+  roles `SUPER_ADMIN`, `ADMIN`, `READ_ONLY`
+- Only `GET /api/health`, `POST /api/user-auth/register`,
+  `POST /api/user-auth/login`, and `POST /api/admin/auth/login` are
+  unauthenticated
+
+The first admin is created automatically on backend startup from
+`ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD`; change the password
+right after the first login.
 
 ### Recommendations
 
-- Change `SECRET_KEY` and `STORYWATCHER_API_TOKEN` for production
+- Change `SECRET_KEY` for production
 - Set a strong `POSTGRES_PASSWORD`
 - Run behind an HTTPS reverse proxy (Nginx/Caddy)
 - The `.env` file is excluded from Git via `.gitignore`
@@ -671,6 +717,9 @@ Main tables: `users`, `telegram_accounts`, `stories`, `story_stats_snapshots`,
 `whitelist`, `blacklist`, `automation_rules`, `activity_logs`,
 `settings_store`, `auth_sessions`, `geo_places`.
 
+Admin panel tables: `admin_users`, `admin_sessions`, `admin_audit_logs`,
+`system_events`, `backup_records`, `backup_operations`.
+
 ## API (summary)
 
 | Method | Path | Description |
@@ -694,7 +743,6 @@ Main tables: `users`, `telegram_accounts`, `stories`, `story_stats_snapshots`,
 | `GET` | `/api/stories/{id}` | Story details |
 | `POST` | `/api/stories/{id}/view` | Add Story to the view queue |
 | `POST` | `/api/stories/{id}/skip` | Skip Story |
-| `GET` | `/api/stories/{id}/views` `/viewers` `/reactions` | Related Story data |
 | `GET` | `/api/queue` | Queue items |
 | `GET` | `/api/queue/count` and `/api/queue/stats` | Queue counts and summary |
 | `PATCH` | `/api/queue/{id}` | Update a queue item |
@@ -704,6 +752,7 @@ Main tables: `users`, `telegram_accounts`, `stories`, `story_stats_snapshots`,
 | `GET` / `POST` | `/api/whitelist` `/api/blacklist` | Author lists |
 | `DELETE` | `/api/whitelist/{entry_id}` `/api/blacklist/{entry_id}` | Remove from a list |
 | `GET` | `/api/rules` `/api/rules/{id}` | Automation rules |
+| `POST`/`PATCH`/`DELETE` | `/api/rules` `/api/rules/{id}` | Create/update/delete a rule |
 | `POST` | `/api/rules/{id}/enable` `/disable` | Enable/disable a rule |
 | `POST` | `/api/rules/{id}/test` | Test a rule |
 | `GET` | `/api/history/views` | View history (pagination) |
@@ -715,6 +764,7 @@ Main tables: `users`, `telegram_accounts`, `stories`, `story_stats_snapshots`,
 | `GET` | `/api/analytics/overview` | Analytics overview (`?days=&period=`) |
 | `GET` | `/api/analytics/stories` | Stories with analytics |
 | `GET` | `/api/analytics/stories/{id}` `/views` `/viewers` `/reactions` | Story analytics details |
+| `GET` | `/api/analytics/daily` | Daily aggregates for the dashboard chart |
 | `GET` | `/api/analytics/recent-events` | Recent events (`?limit=`) |
 | `POST` | `/api/analytics/sync` | Sync analytics (`?account_id=`) |
 | `GET`/`POST` | `/api/settings` | Get/save settings |
@@ -722,12 +772,25 @@ Main tables: `users`, `telegram_accounts`, `stories`, `story_stats_snapshots`,
 | `GET` | `/api/discovery/config` | Discovery config |
 | `POST` | `/api/discovery/config` | Save discovery config |
 | `GET` | `/api/discovery/places` `/places/count` | Collected geo-places |
+| `POST` | `/api/discovery/geocode` | Geocode a city query (`?q=`) |
+| `POST` | `/api/discovery/geo-radius` | Search within a radius of a point |
+| `POST` | `/api/discovery/geo-search` | Geo round-trip: source → hotspot → target |
+| `DELETE` | `/api/discovery/places/{id}` | Remove a discovered place |
 | `GET` | `/api/discovery/geocode` | Geocoding (`?q=`) |
 | `POST` | `/api/discovery/search` | Run discovery search manually |
 
 User authentication uses the `X-API-Token: user.<...>` header (the token is
 returned at login). Full interactive docs: http://localhost:9000/docs (when
 running the backend directly).
+
+### Admin API (`/api/admin/*`)
+
+The admin panel is served under `/api/admin/*` with its own authorization via
+the `x-admin-token` header and role-based access
+(`SUPER_ADMIN`, `ADMIN`, `READ_ONLY`). Endpoints include: admin users and
+sessions, dashboard/overview, accounts overview, system events, periodic job
+control, worker control (pause/resume/status), settings, and backups (create,
+download, restore, auto-backup, secrets snapshot).
 
 ## Project Structure
 
@@ -739,24 +802,32 @@ TG-Story-Watcher/
 │   │   ├── accounts/              # Telegram account management
 │   │   ├── stories/               # Story listing and details
 │   │   ├── queue/                 # View queue management
-│   │   ├── analytics/             # Analytics overview and story details
-│   │   ├── discovery/             # Hashtag/place/geo search
-│   │   ├── settings/              # App settings (limits, view, discovery)
+│   │   ├── discovery/             # "Story Search": hashtags, places, geo-radius
+│   │   ├── analytics/             # Account analytics
+│   │   │   └── stories/[id]/      # Single-Story analytics details
+│   │   ├── statistics/            # Action statistics (views, likes, errors)
+│   │   ├── settings/              # Settings (general, limits, view, filters, etc.)
 │   │   ├── whitelist/             # Author whitelist
 │   │   ├── blacklist/             # Author blacklist
 │   │   ├── history/               # View and activity history
-│   │   └── statistics/            # Account statistics
+│   │   └── admin/                 # Admin panel (13 sections)
 │   ├── components/                # UI components
 │   │   ├── ui.tsx                 # Shared UI primitives (Button, Card, etc.)
-│   │   ├── AppShell.tsx           # Main layout wrapper
+│   │   ├── AppShell.tsx           # Authenticated shell wrapper
+│   │   ├── ShellGate.tsx          # Routing: /admin* gets its own shell
+│   │   ├── TelegramAuthModal.tsx  # Connect Telegram (code → password → 2FA)
+│   │   ├── LandingPage.tsx        # Landing page with login/register form
+│   │   ├── TokenGate.tsx          # Auth token gate
 │   │   ├── Sidebar.tsx            # Navigation sidebar
 │   │   ├── PlacesMap.tsx          # Leaflet map for places
 │   │   ├── GeoSearchMap.tsx       # Geo-radius search map
 │   │   ├── ListManager.tsx        # Whitelist/blacklist management
-│   │   └── TokenGate.tsx          # Auth token gate
+│   │   ├── shellLayout.ts         # Shell geometry (top bar, insets)
+│   │   └── admin/                 # Admin panel components (AdminShell, adminUi)
 │   ├── lib/                       # Utilities
 │   │   ├── api.ts                 # API client (api.get, api.post, etc.)
-│   │   ├── theme.tsx              # Dark/light theme provider
+│   │   ├── adminApi.ts            # Admin panel API client (x-admin-token)
+│   │   ├── theme.tsx              # Theme provider (dark only)
 │   │   ├── i18n.tsx               # Internationalization (EN/RU)
 │   │   ├── format.ts              # Formatting helpers
 │   │   ├── compute_all_from_daily.ts  # Client-side derived parameter calculation
@@ -766,7 +837,7 @@ TG-Story-Watcher/
 │   └── package.json
 ├── backend/                       # Python 3.12 + FastAPI + SQLAlchemy
 │   ├── app/
-│   │   ├── api/                   # Routes
+│   │   ├── api/                   # User-facing API routes
 │   │   │   ├── auth.py            # Telegram MTProto authorization
 │   │   │   ├── user_auth.py       # Local user registration/login
 │   │   │   ├── accounts.py        # Telegram account CRUD
@@ -782,26 +853,33 @@ TG-Story-Watcher/
 │   │   │   ├── history.py         # View/activity history
 │   │   │   ├── schemas.py         # Pydantic schemas
 │   │   │   ├── deps.py            # Auth dependencies (current_user_id)
-│   │   │   └── timezone.py        # Timezone helpers
+│   │   │   ├── timezone.py        # Timezone helpers
+│   │   │   └── admin/             # Admin panel routes /api/admin/*
+│   │   ├── admin_auth.py          # Admin authentication and roles (HMAC)
+│   │   ├── admin_models.py        # Admin panel ORM models (6 tables)
 │   │   ├── analytics/             # Analytics service (archive collection)
 │   │   ├── filters/               # Filter engine for story processing
 │   │   ├── queue/                 # Queue processor (per-request RPC timeouts)
-│   │   ├── services/              # Business logic (settings auto-derivation)
+│   │   ├── services/              # Business logic, settings auto-derivation, audit
+│   │   │   └── backup/            # Backups (archive, encryption, storage, auto)
+│   │   ├── settings/              # Defaults and new-user onboarding
 │   │   ├── stories/               # Story monitoring, discovery, and ingest
 │   │   ├── telegram/              # MTProto client manager (Telethon)
 │   │   │   └── client_manager.py  # Session lifecycle, SQLite conversion
 │   │   ├── workers/               # Background workers
 │   │   │   ├── combined.py        # Entry point: scheduler + queue + VPN monitor
 │   │   │   ├── scheduler.py       # Story sync, analytics, discovery scheduling
-│   │   │   └── queue_worker.py    # Queue draining with concurrency control
+│   │   │   ├── queue_worker.py    # Queue draining with concurrency control
+│   │   │   └── worker_control.py  # Worker control via Redis (pause/status)
 │   │   ├── config.py              # pydantic-settings configuration
-│   │   ├── db.py                  # SQLAlchemy engine, sessions, pool
+│   │   ├── db.py                  # SQLAlchemy engine, sessions, pool, migrations
 │   │   ├── main.py                # FastAPI app (lifespan, CORS, health)
-│   │   ├── models.py              # ORM models (15 tables)
+│   │   ├── models.py              # User-facing ORM models (15 tables)
 │   │   ├── multitenancy.py        # User token creation/verification (HMAC)
 │   │   └── vpn_monitor.py         # VPN IP change detection
 │   ├── tests/                     # Integration tests (pytest + SQLite)
 │   ├── migrate_limits_derived.py  # Migration: recalculate derived settings
+│   ├── migrate_existing_user.py   # Migration: port legacy users
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── healthcheck.sh
@@ -833,7 +911,8 @@ python -m pytest tests/ -v
 
 Tests cover: Stories pagination/sorting, aggregated dashboard charts,
 statistics, analytics (viewers/periods/top stories), `compute_all_from_daily()`
-caching, and discovery rotation dict isolation.
+caching, discovery rotation dict isolation, and new-user onboarding (starter
+hashtags, auto-enabling search and monitoring after connecting Telegram).
 
 ## Troubleshooting
 

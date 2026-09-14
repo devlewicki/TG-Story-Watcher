@@ -592,6 +592,39 @@ async def run_forever(interval: float) -> None:
         await asyncio.sleep(interval)
 
 
+async def reconcile_orphaned_clients() -> int:
+    """Drop cached Telegram clients whose account rows no longer exist.
+
+    Deleted users/accounts (admin panel) are never picked again by
+    ``run_once``/discovery, but the in-memory ``cm._clients`` cache keeps the
+    account authorized on Telegram until a restart or VPN IP change. This
+    releases the cached client + leftover session files so the phone number can
+    be used by a fresh login right away.
+    """
+    ids = cm.cached_account_ids()
+    if not ids:
+        return 0
+    db = SessionLocal()
+    try:
+        existing = {
+            row[0]
+            for row in db.query(TelegramAccount.id).filter(TelegramAccount.id.in_(ids)).all()
+        }
+    finally:
+        db.close()
+    dropped = 0
+    for account_id in ids:
+        if account_id not in existing:
+            try:
+                await cm.forget_account(account_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("forget_account(%s) failed: %s", account_id, exc)
+            dropped += 1
+    if dropped:
+        logger.info("reconciled %d orphaned Telegram client(s)", dropped)
+    return dropped
+
+
 def main() -> None:
     import os
 

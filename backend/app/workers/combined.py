@@ -267,6 +267,13 @@ async def run() -> None:
             cycle_had_error = True
         _mark_cycle()  # queue drain completed → main loop is alive
 
+        # 1a) Release Telegram sessions of accounts that were deleted (admin
+        #     user/account deletion) so their phone numbers free up promptly.
+        try:
+            await scheduler.reconcile_orphaned_clients()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orphaned client reconcile failed: %s", exc)
+
         # 2) Periodic cleanup of old VIEWED queue items and activity logs.
         if now - last_cleanup >= 3600:  # every hour
             try:

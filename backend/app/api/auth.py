@@ -20,6 +20,22 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 Db = Annotated[Session, Depends(get_db)]
 
 
+def _friendly_auth_error(exc: Exception) -> str | None:
+    """Map Telegram/Telethon errors into a user-friendly Russian message."""
+    try:
+        from telethon import errors as tl_errors
+    except ImportError:
+        return None
+    if isinstance(exc, tl_errors.FloodWaitError):
+        secs = getattr(exc, "seconds", None)
+        if secs:
+            return f"Слишком много попыток — Telegram просит подождать {int(secs)} сек."
+        return "Слишком много попыток, попробуйте позже."
+    if isinstance(exc, (tl_errors.SendCodeUnavailableError, tl_errors.PhoneNumberFloodError)):
+        return "Telegram временно ограничил отправку кодов на этот номер — попробуйте через несколько минут."
+    return None
+
+
 class SendCodeIn(BaseModel):
     phone: str = Field(..., min_length=5)
 
@@ -157,7 +173,12 @@ def _session_path_for_deleted(account_id: int) -> str:
 async def send_code(payload: SendCodeIn, user_id: Annotated[int, Depends(current_user_id)]):
     try:
         await cm.auth_send_code(payload.phone)
+    except cm.CooldownError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except Exception as exc:
+        friendly = _friendly_auth_error(exc)
+        if friendly:
+            raise HTTPException(status_code=429, detail=friendly)
         raise HTTPException(status_code=400, detail=f"failed to send code: {exc}")
     return {"status": "code_sent"}
 
@@ -167,7 +188,9 @@ async def confirm_code(payload: ConfirmCodeIn, db: Db, user_id: Annotated[int, D
     try:
         result = await cm.auth_confirm_code(payload.phone, payload.code)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"confirmation failed: {exc}")
+        friendly = _friendly_auth_error(exc)
+        detail = friendly or f"confirmation failed: {exc}"
+        raise HTTPException(status_code=429 if friendly else 400, detail=detail)
     if result.get("status") == "twofa":
         return AuthStatusOut(status="twofa", needs_password=True)
     if result.get("status") != "ok":
@@ -180,7 +203,9 @@ async def confirm_password(payload: ConfirmPasswordIn, db: Db, user_id: Annotate
     try:
         ok = await cm.auth_confirm_password(payload.phone, payload.password)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"password confirmation failed: {exc}")
+        friendly = _friendly_auth_error(exc)
+        detail = friendly or f"password confirmation failed: {exc}"
+        raise HTTPException(status_code=429 if friendly else 400, detail=detail)
     if not ok:
         raise HTTPException(status_code=400, detail="invalid 2FA password")
     return await _finalize(payload.phone, db, user_id)

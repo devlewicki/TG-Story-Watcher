@@ -92,6 +92,8 @@ const ru = {
     reloginDesc: "Сессия Telegram устарела из-за смены IP-адреса. Введите код подтверждения для восстановления.",
     reloginButton: "Восстановить сессию",
     sendingCode: "Отправляем код…",
+    sendCodeCountdown: "Отправить повторно ({seconds} с)",
+    codeSentNotice: "Код отправлен. Повторная отправка станет доступна через {seconds} с.",
   },
 
   // Stories

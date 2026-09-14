@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 import { Button, IconButton, Icon } from "@/components/ui";
 
 type FlowStep = "phone" | "code" | "password";
+
+// Must match backend SEND_CODE_COOLDOWN (client_manager.py).
+const SEND_CODE_COOLDOWN = 60;
 
 export function TelegramAuthModal({
   onClose,
@@ -25,6 +28,15 @@ export function TelegramAuthModal({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+
+  // Visible resend countdown so users don't hammer send-code (Telegram
+  // exhausts a number's delivery options and rejects resends).
+  useEffect(() => {
+    if (countdown <= 0) return;
+    const id = setInterval(() => setCountdown((c) => Math.max(0, c - 1)), 1000);
+    return () => clearInterval(id);
+  }, [countdown]);
 
   const doSendCode = async (targetPhone: string) => {
     setError("");
@@ -32,8 +44,17 @@ export function TelegramAuthModal({
     try {
       await api.post("/auth/send-code", { phone: targetPhone });
       setStep("code");
+      setCountdown(SEND_CODE_COOLDOWN);
     } catch (e) {
-      setError((e as Error).message);
+      const err = e as ApiError;
+      setError(err.message);
+      if (err.status === 429) {
+        const match = err.message.match(/(\d+)/);
+        const secs = match
+          ? Math.max(5, Math.min(SEND_CODE_COOLDOWN, parseInt(match[1], 10)))
+          : SEND_CODE_COOLDOWN;
+        setCountdown(secs);
+      }
     }
     setBusy(false);
   };
@@ -121,6 +142,12 @@ export function TelegramAuthModal({
           <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">{t("accounts.sendingCode")}</p>
         )}
 
+        {step === "phone" && !busy && countdown > 0 && (
+          <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+            {t("accounts.codeSentNotice", { seconds: countdown })}
+          </p>
+        )}
+
         {step === "code" && (
           <div className="mt-4">
             <label className="text-sm text-slate-600 dark:text-slate-300">
@@ -158,7 +185,13 @@ export function TelegramAuthModal({
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
           {step === "phone" && (
-            <Button onClick={sendCode} disabled={busy}>{busy ? "…" : t("common.sendCode")}</Button>
+            <Button onClick={sendCode} disabled={busy || countdown > 0}>
+              {busy
+                ? "…"
+                : countdown > 0
+                  ? t("accounts.sendCodeCountdown", { seconds: countdown })
+                  : t("common.sendCode")}
+            </Button>
           )}
           {step === "code" && (
             <Button onClick={confirmCode} disabled={busy}>{busy ? "…" : t("common.confirm")}</Button>
