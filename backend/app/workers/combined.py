@@ -214,6 +214,7 @@ async def run() -> None:
             proxy_host=_settings.telegram_proxy_host,
             proxy_port=_settings.telegram_proxy_port or 1080,
             check_interval=float(os.environ.get("VPN_IP_CHECK_INTERVAL", "30")),
+            stability_checks=int(os.environ.get("VPN_IP_STABILITY_CHECKS", "2")),
         )
         logger.info("VPN IP monitor enabled (host=%s, interval=%ss)",
                      _settings.telegram_proxy_host, vpn_monitor._check_interval)

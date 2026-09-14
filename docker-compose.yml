@@ -15,6 +15,7 @@ services:
       VPN_SCAN_PORT: ${VPN_SCAN_PORT:-1081}
       VPN_SCAN_SLEEP: ${VPN_SCAN_SLEEP:-1.0}
       VPN_SCAN_ATTEMPTS: ${VPN_SCAN_ATTEMPTS:-2}
+      VPN_SERVER_FILTER: ${VPN_SERVER_FILTER:-}
     healthcheck:
       test: ["CMD", "curl", "-x", "socks5://127.0.0.1:1080", "-sf", "https://www.gstatic.com/generate_204"]
       interval: 20s
