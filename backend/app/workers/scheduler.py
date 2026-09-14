@@ -62,7 +62,7 @@ async def sync_account(account: TelegramAccount) -> int:
             lookup = monitor._load_sets()
             await load_contacts_into(client, acc, lookup)
             monitor._lookup = lookup
-            count = await monitor.fetch_available(resync=True)
+            count = await monitor.fetch_available()
             acc.status = AccountStatus.ACTIVE.value
             acc.last_seen_at = datetime.now(timezone.utc)
             db.commit()

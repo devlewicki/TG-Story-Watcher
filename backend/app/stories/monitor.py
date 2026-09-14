@@ -14,6 +14,7 @@ from ..models import (
     ActivityLog,
     BlacklistEntry,
     GeoPlace,
+    SettingsStore,
     Story,
     StoryQueue,
     StoryView,
@@ -34,6 +35,13 @@ _WARNED_SKIP_CAP = False
 # dropped proxy tunnel would otherwise hang the await forever and freeze the
 # whole main loop / background discovery task.
 RPC_TIMEOUT = 120.0
+
+# How long a stored stories.getAllStories ``state`` may be reused before we
+# force a full refetch.  Telegram's state hash is meant for incremental sync,
+# but a state that sat idle (e.g. Redis/DB staleness, long downtime) with no
+# stories changed is still returned by the server so re-using it is safe;
+# this just bounds how often we re-evaluate the whole feed anyway.
+ALLSTORIES_STATE_TTL = timedelta(hours=6)
 
 
 def datetime_from_tl(dt) -> datetime | None:
@@ -175,6 +183,42 @@ class StoryMonitor:
         of a new batch cycle (e.g. before fetch_available).
         """
         self._engine_cache = None
+
+    # ---- incremental state for stories.getAllStories ----
+    def _allstories_state_key(self) -> str:
+        return f"account:{self.account.id}:allstories_state"
+
+    def _load_allstories_state(self) -> str | None:
+        """Last successful GetAllStories state for this account, unless it is
+        stale enough that we should just do a full refetch anyway.
+        """
+        row = self.db.get(SettingsStore, self._allstories_state_key())
+        if row is None or not row.value:
+            return None
+        updated = row.updated_at
+        if updated is None:
+            return None
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - updated > ALLSTORIES_STATE_TTL:
+            return None
+        return row.value
+
+    def _save_allstories_state(self, state: str) -> None:
+        if not state:
+            return
+        key = self._allstories_state_key()
+        row = self.db.get(SettingsStore, key)
+        if row is None:
+            self.db.add(SettingsStore(key=key, value=state))
+        else:
+            row.value = state
+            row.updated_at = datetime.now(timezone.utc)
+        try:
+            self.db.commit()
+        except Exception:  # noqa: BLE001
+            self.db.rollback()
+            logger.warning("failed to persist allstories state for account %s", self.account.id)
 
     def author_info(self, peer_id: int, info: dict, fl) -> AuthorInfo:
         username = info.get("username")
@@ -378,11 +422,16 @@ class StoryMonitor:
         return True
 
     # ---- fetching available stories (burst fetch) ----
-    async def fetch_available(self, resync: bool = True) -> int:
+    async def fetch_available(self, resync: bool = False) -> int:
         peer_cache: dict[int, dict] = {}
         processed = 0
-        state = None
+        # Normal cycles are incremental: reuse the last GetAllStories ``state``
+        # so Telegram only returns stories that actually changed.  resync=True
+        # forces a full refetch (used e.g. after a reconnect) and then we store
+        # the fresh state again.
+        state = None if resync else self._load_allstories_state()
         first = True
+        got_response = False
         self.invalidate_engine_cache()
         while True:
             try:
@@ -405,6 +454,12 @@ class StoryMonitor:
                     db=self.db,
                 )
                 break
+
+            # Capture the state right away — also from an AllStoriesNotModified
+            # response, which carries a state but no stories (we still want to
+            # remember it so Telegram never re-sends the unchanged feed).
+            state = getattr(res, "state", None)
+            got_response = True
 
             # Stories come in three shapes across Telegram layers:
             #   - legacy wrapped items with ``.story`` and ``.peer``
@@ -480,7 +535,6 @@ class StoryMonitor:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("collect_venues failed: %s", exc)
 
-            state = getattr(res, "state", None)
             first = False
             if not getattr(res, "has_more", False):
                 break
@@ -490,12 +544,19 @@ class StoryMonitor:
             if processed > 5000:
                 break
 
-        activity.log(
-            f"Fetched available stories (processed={processed})",
-            event_type="fetch_available",
-            account_id=self.account.id,
-            db=self.db,
-        )
+        # Persist the fresh state so the next cycle is incremental.  An
+        # AllStoriesNotModified response already produced one above, so this
+        # also covers the "nothing changed" early-exit path.
+        if got_response:
+            self._save_allstories_state(state)
+
+        if processed > 0:
+            activity.log(
+                f"Fetched available stories (processed={processed})",
+                event_type="fetch_available",
+                account_id=self.account.id,
+                db=self.db,
+            )
         return processed
 
 
