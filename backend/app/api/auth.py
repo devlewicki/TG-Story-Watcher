@@ -110,9 +110,10 @@ def _find_duplicate(db: Session, account: TelegramAccount, normalized_phone: str
 
 
 async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
-    account = _account_for_phone(db, phone, user_id)
-    original_id = account.id
+    original_id = None
     try:
+        account = _account_for_phone(db, phone, user_id)
+        original_id = account.id
         client = await cm.finish_login(phone, account)
         me = await client.get_me()
         normalized_phone = cm.normalize_phone(getattr(me, "phone", None)) if me else ""
@@ -161,7 +162,8 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
         logger.exception("Telegram session finalization failed")
         raise HTTPException(status_code=500, detail=f"session finalize failed: {exc}")
     finally:
-        await cm.release_client(original_id)
+        if original_id is not None:
+            await cm.release_client(original_id)
     return AuthStatusOut(status="authed", needs_password=False)
 
 

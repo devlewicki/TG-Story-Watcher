@@ -83,8 +83,21 @@ def client(db):
 # ---------- Token / user fixtures ----------
 
 @pytest.fixture()
-def user_id():
-    return 42
+def user_id(db):
+    # A real users row for the default test token: token validation (see
+    # multitenancy.user_id_from_token) rejects tokens whose user no longer
+    # exists, so the shared test identity must actually be present.
+    uid = 42
+    if db.get(User, uid) is None:
+        db.add(User(
+            id=uid,
+            first_name="Test",
+            last_name="User",
+            email=f"user{uid}@test.local",
+            password_hash="x",
+        ))
+        db.commit()
+    return uid
 
 @pytest.fixture()
 def api_token(user_id):
