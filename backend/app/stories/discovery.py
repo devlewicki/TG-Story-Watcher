@@ -44,6 +44,20 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _connected(monitor: StoryMonitor) -> bool:
+    """Cheap local check that the Telethon client is still connected.
+
+    Called before (and between) Telegram RPCs so that a VPN-level disconnect
+    aborts the discovery cycle immediately instead of burning hundreds of
+    failing ``SearchPosts`` requests ("Cannot send requests while
+    disconnected") across the rest of the cycle.
+    """
+    try:
+        return bool(monitor.client.is_connected())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _geo_point_from_text(text: str) -> types.GeoPoint | None:
     """Parse a 'lat,long' string into a GeoPoint, or None if not coordinates."""
     text = text.strip()
@@ -74,6 +88,10 @@ async def search_hashtags(
         tag = tag.strip().lstrip("#")
         if not tag:
             continue
+        # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
+        if not _connected(monitor):
+            logger.info("discovery: client disconnected — aborting hashtag search")
+            break
         try:
             count = await _search_posts(monitor, hashtag=tag, limit=limit)
             processed += count
@@ -126,6 +144,10 @@ async def search_locations(
         loc = loc.strip()
         if not loc:
             continue
+        # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
+        if not _connected(monitor):
+            logger.info("discovery: client disconnected — aborting location search")
+            break
         # Cities are resolved specially: try a collected venue with a matching
         # title first, otherwise fall back to a hashtag search with the city
         # name (Telegram rejects arbitrary geo points, see module docstring).
@@ -310,6 +332,9 @@ async def _search_posts(
     processed = 0
     pages = 0
     while True:
+        if not _connected(monitor):
+            logger.info("discovery: client disconnected — aborting pagination of current search")
+            break
         pages += 1
         # Bound pagination by pages: expired stories never count toward
         # ``processed``, so a processed-based cap would walk huge hashtags

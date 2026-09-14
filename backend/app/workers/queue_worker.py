@@ -21,6 +21,7 @@ from typing import Sequence
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm.exc import StaleDataError
 
 from telethon.errors import AuthKeyDuplicatedError
 
@@ -108,7 +109,10 @@ def _recover_stale_processing(
         item.error = None
         item.scheduled_at = _now()
     if stale:
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
     return len(stale)
 
 
@@ -372,6 +376,17 @@ async def _drain_account(db: Session, account: TelegramAccount) -> int:
                 db.rollback()
                 await asyncio.sleep(2 ** _attempt)
                 continue
+            # Stale row (web/admin process changed or deleted the item between
+            # our load and flush): a plain race, not an account failure. Roll
+            # back and let the next sweep re-evaluate the queue instead of
+            # flagging the whole account as ERROR.
+            if isinstance(exc, StaleDataError) or "StaleDataError" in type(exc).__name__:
+                logger.warning(
+                    "drain_queue(%s) stale queue row (concurrent update) — rolling back, attempt %d",
+                    account.id, _attempt + 1,
+                )
+                db.rollback()
+                return 0
             # AuthKey duplicated: VPN IP changed — session is permanently
             # invalidated.  Delete the session file and mark AUTH_REQUIRED.
             is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
@@ -413,15 +428,26 @@ async def _drain_account(db: Session, account: TelegramAccount) -> int:
                 await asyncio.sleep(2 ** _attempt)
                 continue
             logger.error("drain_queue(%s) failed: %s", account.id, exc)
-            account.status = AccountStatus.ERROR.value
-            activity.log(
-                f"worker drain failed: {exc}",
-                event_type="worker_error",
-                level="ERROR",
-                account_id=account.id,
-                db=db,
-            )
-            db.commit()
+            # The session may be in a failed (pending-rollback) state — roll
+            # back before writing the ERROR status so the commit below can't
+            # raise PendingRollbackError (which previously cascaded into a
+            # worker cycle error).
+            db.rollback()
+            try:
+                acc = db.get(TelegramAccount, account.id)
+                if acc is None:
+                    return 0
+                acc.status = AccountStatus.ERROR.value
+                activity.log(
+                    f"worker drain failed: {exc}",
+                    event_type="worker_error",
+                    level="ERROR",
+                    account_id=account.id,
+                    db=db,
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
             return 0
     return 0
 
