@@ -225,6 +225,25 @@ class BackupService:
         if not proc.stdout.strip():
             raise BackupError("pg_restore --list produced an empty table of contents")
 
+    def _probe_sqlite(self, dump_path: str) -> None:
+        """Verify a SQLite dump (snapshot) is readable by running an integrity
+        check with the embedded sqlite3 module — the same engine that would
+        perform the restore. pg_restore cannot read sqlite archives at all,
+        so it is probed with sqlite3 instead of pg_restore.
+        """
+        import sqlite3
+
+        try:
+            conn = sqlite3.connect(f"file:{dump_path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            raise BackupError(f"sqlite dump is not readable: {exc}") from None
+        try:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            if not row or (row[0] if row else "") != "ok":
+                raise BackupError(f"sqlite integrity check failed: {row[0] if row else 'no result'}")
+        finally:
+            conn.close()
+
     def _restore_database(self, dump_path: str) -> None:
         url = str(engine.url)
         if url.startswith("postgresql"):
@@ -664,13 +683,17 @@ class BackupService:
                                 else (len(sessions) == int(manifest_sessions))
                             )
 
-                            # Probe the dump with the actual pg_restore that
-                            # would perform the restore: catches pg_dump/pg_restore
-                            # version mismatches ("unsupported version in file
-                            # header") at VALIDATION time instead of mid-restore.
-                            # If pg_restore is not installed at all, the probe is
-                            # skipped (unknown) rather than failing validation.
+                            # Probe the dump with the actual restore engine:
+                            # pg_restore for postgres backups (catches
+                            # pg_dump/pg_restore version mismatches at VALIDATION
+                            # time instead of mid-restore), sqlite3 for sqlite
+                            # backups (pg_restore cannot read sqlite archives at
+                            # all, so probing it on a sqlite dump is meaningless).
+                            # If the probing tool is not installed at all, the
+                            # probe is skipped (unknown) rather than failing
+                            # validation.
                             dump_readable = None
+                            db_type = manifest.get("database_type", "postgresql")
                             if has_dump:
                                 self._set_progress(op_id, 90, "dump probe")
                                 dump_m = tar.extractfile(f"{ARCHIVE_MEMBER_ROOT}{DB_DUMP_NAME}")
@@ -679,12 +702,15 @@ class BackupService:
                                     if dump_m is not None:
                                         shutil.copyfileobj(dump_m, dfh)
                                 try:
-                                    self._probe_dump(dump_probe_path)
+                                    if db_type == "sqlite":
+                                        self._probe_sqlite(dump_probe_path)
+                                    else:
+                                        self._probe_dump(dump_probe_path)
                                     dump_readable = True
                                 except BackupError:
                                     dump_readable = False
                                 except (FileNotFoundError, OSError):
-                                    dump_readable = None  # pg_restore unavailable — skip probe
+                                    dump_readable = None  # probe tool unavailable — skip probe
 
                             result = {
                                 "valid": checksum_errors == 0 and has_dump and dump_readable is not False,
