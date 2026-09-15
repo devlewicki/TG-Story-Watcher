@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
-from telethon import functions, types
+from telethon import errors, functions, types
 
 from ..filters.engine import AuthorInfo, FilterEngine
 from ..models import (
@@ -438,6 +438,13 @@ class StoryMonitor:
                     ),
                     timeout=RPC_TIMEOUT,
                 )
+            except errors.UnauthorizedError:
+                # The session's auth key was invalidated on Telegram's side (the
+                # account was logged out / terminated). Polling it every cycle
+                # would just re-log the same error forever, so let the caller
+                # (scheduler/worker) mark the account AUTH_REQUIRED.
+                logger.error("getAllStories unauthorized (key not registered) — account needs re-login")
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.error("getAllStories failed: %s", exc)
                 activity.log(

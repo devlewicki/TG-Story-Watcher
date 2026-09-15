@@ -139,6 +139,7 @@ export type AdminUserRow = {
   queue_active: number;
   last_activity: string | null;
   blocked: boolean;
+  account_status: string | null;
 };
 
 export type AdminAccountRow = {

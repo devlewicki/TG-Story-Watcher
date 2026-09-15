@@ -160,7 +160,7 @@ export default function AdminUsersPage() {
               <Td>{u.queue_active}</Td>
               <Td className="text-xs text-slate-400">{formatTime(u.last_activity)}</Td>
               <Td>
-                <AdminStatusBadge status={u.blocked ? "FAILED" : "ACTIVE"} />
+                <AdminStatusBadge status={u.account_status ?? (u.blocked ? "FAILED" : "ACTIVE")} />
               </Td>
               <Td>
                 <div className="flex flex-wrap justify-end gap-1">

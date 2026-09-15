@@ -49,7 +49,7 @@ RPC_TIMEOUT = 120.0
 # scheduler's rotation offsets advance every cycle regardless, so venues we
 # skip here simply come around again a few cycles later.
 SEARCH_POSTS_MIN_INTERVAL = 6.0
-SEARCH_POSTS_CYCLE_BUDGET = 20
+SEARCH_POSTS_CYCLE_BUDGET = 30
 
 _search_rpc_last: dict[int, float] = {}
 _search_rpc_cycle_budget: dict[int, int] = {}
@@ -183,6 +183,11 @@ async def search_hashtags(
             if _flood_hits[monitor.account.id] >= 2:
                 logger.info("discovery #%s: repeated flood — stopping hashtag search", tag)
                 break
+        except errors.UnauthorizedError:
+            # Session was revoked server-side (account logged out). Re-raise so
+            # the scheduler marks the account AUTH_REQUIRED instead of treating
+            # every search as a transient failure.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery #%s failed: %s", tag, exc)
             activity.log(
@@ -263,6 +268,11 @@ async def search_locations(
             if _flood_hits[monitor.account.id] >= 2:
                 logger.info("discovery geo '%s': repeated flood — stopping location search", loc)
                 break
+        except errors.UnauthorizedError:
+            # Session was revoked server-side (account logged out). Re-raise so
+            # the scheduler marks the account AUTH_REQUIRED instead of treating
+            # every search as a transient failure.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery geo '%s' failed: %s", loc, exc)
             activity.log(
@@ -311,6 +321,8 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
                 logger.warning("discovery geo '%s' flood wait %ss", city, e.seconds)
                 _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
                 return 0
+            except errors.UnauthorizedError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("discovery geo '%s' via place failed: %s", city, exc)
 
@@ -332,6 +344,8 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
         logger.warning("discovery city '%s' flood wait %ss", city, e.seconds)
         _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
         return 0
+    except errors.UnauthorizedError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("discovery city '%s' hashtag search failed: %s", city, exc)
         activity.log(

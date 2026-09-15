@@ -55,6 +55,30 @@ def _user_row(db: Session, u: User) -> dict:
         .order_by(ActivityLog.created_at.desc())
         .first()
     )
+    # Real per-account statuses of this user's accounts (the heuristic
+    # `blocked` badge below used to conflate "no monitoring account" with
+    # "user is blocked" — that is wrong: an AUTH_REQUIRED (logged-out) account
+    # has monitoring off but the user is NOT blocked).
+    acc_statuses = (
+        db.query(TelegramAccount.status)
+        .filter(TelegramAccount.user_id == u.id, TelegramAccount.status.isnot(None))
+        .all()
+    )
+    account_status = None
+    if acc_statuses:
+        sev = {
+            AccountStatus.AUTH_REQUIRED.value: 0,
+            AccountStatus.BANNED_OR_RESTRICTED.value: 1,
+            AccountStatus.ERROR.value: 2,
+            AccountStatus.DISCONNECTED.value: 3,
+            AccountStatus.FLOOD_WAIT.value: 4,
+            AccountStatus.PAUSED.value: 5,
+            AccountStatus.ACTIVE.value: 6,
+        }
+        worst = min(sev.get(s[0], 7) for s in acc_statuses)
+        account_status = next(
+            (name for name, lvl in sev.items() if lvl == worst), acc_statuses[0][0]
+        )
     blocked = bool(
         db.query(func.count(TelegramAccount.id)).filter(
             TelegramAccount.user_id == u.id, TelegramAccount.monitoring.is_(True)
@@ -72,6 +96,7 @@ def _user_row(db: Session, u: User) -> dict:
         "views_today": views_today,
         "queue_active": queue_active,
         "last_activity": last_activity[0].isoformat() if last_activity else None,
+        "account_status": account_status,
         "blocked": blocked,
     }
 

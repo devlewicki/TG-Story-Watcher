@@ -14,7 +14,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError
 
 CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
 
@@ -84,29 +84,22 @@ async def sync_account(account: TelegramAccount) -> int:
                 db.rollback()
                 db.close()
                 try:
-                    await cm.drop_client(account.id)
+                    await cm.mark_account_auth_required(account.id, drop_session=True)
                 except Exception:
                     pass
-                db2 = SessionLocal()
+                return 0
+            # Auth key unregistered: Telegram revoked the session (logout /
+            # forced termination) — the account needs a fresh login, but the
+            # session file is kept so the re-login flow can reuse it.
+            is_auth_unreg = isinstance(exc, (AuthKeyUnregisteredError, UnauthorizedError)) or "key is not registered" in str(exc).lower()
+            if is_auth_unreg:
+                logger.error("sync_account(%s) session unregistered — marking AUTH_REQUIRED", account.id)
+                db.rollback()
+                db.close()
                 try:
-                    acc2 = db2.get(TelegramAccount, account.id)
-                    if acc2 is not None:
-                        acc2.status = AccountStatus.AUTH_REQUIRED.value
-                        acc2.monitoring = False
-                        # Remove the dead session file so the user is
-                        # prompted to re-login instead of hitting the
-                        # same error on every sync cycle.
-                        if acc2.session_path and os.path.isfile(acc2.session_path):
-                            try:
-                                os.remove(acc2.session_path)
-                            except OSError:
-                                pass
-                        acc2.session_path = None
-                    db2.commit()
+                    await cm.mark_account_auth_required(account.id, drop_session=False)
                 except Exception:
-                    db2.rollback()
-                finally:
-                    db2.close()
+                    pass
                 return 0
             # Connection errors: force a full reconnect before retrying.
             is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
@@ -161,26 +154,17 @@ async def run_analytics_once() -> None:
             logger.warning("analytics sync account=%s AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
             local.close()
             try:
-                await cm.drop_client(account.id)
+                await cm.mark_account_auth_required(account.id, drop_session=True)
             except Exception:
                 pass
-            db2 = SessionLocal()
+            continue
+        except (AuthKeyUnregisteredError, UnauthorizedError) as exc:
+            logger.warning("analytics sync account=%s session unregistered — marking AUTH_REQUIRED", account.id)
+            local.close()
             try:
-                acc2 = db2.get(TelegramAccount, account.id)
-                if acc2 is not None:
-                    acc2.status = AccountStatus.AUTH_REQUIRED.value
-                    acc2.monitoring = False
-                    if acc2.session_path and os.path.isfile(acc2.session_path):
-                        try:
-                            os.remove(acc2.session_path)
-                        except OSError:
-                            pass
-                    acc2.session_path = None
-                db2.commit()
+                await cm.mark_account_auth_required(account.id, drop_session=False)
             except Exception:
-                db2.rollback()
-            finally:
-                db2.close()
+                pass
             continue
         except Exception as exc:  # noqa: BLE001
             logger.warning("analytics sync account=%s failed: %s", account.id, exc)
@@ -450,16 +434,16 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             return
         try:
             client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
-        except AuthKeyDuplicatedError:
-            logger.error("discover_account(%s) AuthKeyDuplicatedError on connect", account.id)
-            # Fall through to outer except AuthKeyDuplicatedError handler.
+        except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError):
+            logger.error("discover_account(%s) auth failure on connect", account.id)
+            # Fall through to outer auth handlers.
             raise
         except (ConnectionError, OSError, TimeoutError) as exc:
             logger.warning("discover_account(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
             try:
                 client = await asyncio.wait_for(cm.reconnect(acc), timeout=CONNECT_TIMEOUT)
-            except AuthKeyDuplicatedError:
-                logger.error("discover_account(%s) AuthKeyDuplicatedError on reconnect", account.id)
+            except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError):
+                logger.error("discover_account(%s) auth failure on reconnect", account.id)
                 raise
             except Exception as reconnect_exc:
                 logger.error("discover_account(%s) reconnect also failed: %s", account.id, reconnect_exc)
@@ -595,36 +579,34 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         locations = _dedupe_locations(locations)
         # Give this account a fresh SearchPosts pacing budget for the cycle.
         discovery._reset_pacing(monitor)
-        # Geolocation first: it is the primary discovery mode and may be slow,
-        # so big hashtag lists must not starve it.
-        if locations:
-            await discovery.search_locations(monitor, locations, limit)
+        # Hashtags first: they reliably return results (venue searches are
+        # noisy/empty in practice), so give them the budget before locations
+        # consume it all.
+        hashtag_processed = 0
         if hashtags:
-            await discovery.search_hashtags(monitor, hashtags, limit)
+            hashtag_processed = await discovery.search_hashtags(monitor, hashtags, limit)
+        location_processed = 0
+        if locations:
+            location_processed = await discovery.search_locations(monitor, locations, limit)
+        logger.info(
+            "discovery: account %s cycle done — hashtags %d/%d (processed=%d), locations %d (processed=%d)",
+            account.id, len(hashtags), hashtag_budget, hashtag_processed,
+            len(locations), location_processed,
+        )
     except AuthKeyDuplicatedError as exc:
         logger.error("discover_account(%s) AuthKeyDuplicatedError — session invalidated by IP change, marking AUTH_REQUIRED", account.id)
         db.close()
         try:
-            await cm.drop_client(account.id)
+            await cm.mark_account_auth_required(account.id, drop_session=True)
         except Exception:
             pass
-        db2 = SessionLocal()
+    except (AuthKeyUnregisteredError, UnauthorizedError) as exc:
+        logger.error("discover_account(%s) session unregistered — marking AUTH_REQUIRED", account.id)
+        db.close()
         try:
-            acc2 = db2.get(TelegramAccount, account.id)
-            if acc2 is not None:
-                acc2.status = AccountStatus.AUTH_REQUIRED.value
-                acc2.monitoring = False
-                if acc2.session_path and os.path.isfile(acc2.session_path):
-                    try:
-                        os.remove(acc2.session_path)
-                    except OSError:
-                        pass
-                acc2.session_path = None
-            db2.commit()
+            await cm.mark_account_auth_required(account.id, drop_session=False)
         except Exception:
-            db2.rollback()
-        finally:
-            db2.close()
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.error("discover_account(%s) failed: %s", account.id, exc)
     finally:

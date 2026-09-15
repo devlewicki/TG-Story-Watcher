@@ -43,7 +43,7 @@ from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 
 from ..config import get_settings
-from ..models import AccountStatus
+from ..models import AccountStatus, TelegramAccount
 
 logger = logging.getLogger("storywatcher.telegram")
 settings = get_settings()
@@ -276,6 +276,40 @@ async def forget_account(account_id: int) -> None:
             os.remove(path + suffix)
         except OSError:
             pass
+
+
+async def mark_account_auth_required(
+    account_id: int, *, drop_session: bool = False
+) -> None:
+    """Mark an account as needing re-login (``AUTH_REQUIRED``).
+
+    Called when Telegram invalidates the account's auth key (logout /
+    ``AuthKeyUnregisteredError`` / ``AuthKeyDuplicatedError``). Stops monitoring
+    and drops the cached client. The dead ``session_path`` file is only removed
+    when ``drop_session=True`` (an invalidated/duplicated auth key) — for a
+    merely logged-out session it is kept so the re-login flow can reuse it.
+    """
+    from ..db import SessionLocal
+
+    await drop_client(account_id)
+    db = SessionLocal()
+    try:
+        acc = db.get(TelegramAccount, account_id)
+        if acc is not None:
+            acc.status = AccountStatus.AUTH_REQUIRED.value
+            acc.monitoring = False
+            if drop_session and acc.session_path and os.path.isfile(acc.session_path):
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    try:
+                        os.remove(acc.session_path + suffix)
+                    except OSError:
+                        pass
+                acc.session_path = None
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 async def update_account_identity(account, client):
