@@ -25,6 +25,12 @@ import time
 
 from ..db import init_db, SessionLocal
 from . import queue_worker, scheduler
+from .worker_control import (
+    _publish_heartbeat,
+    consume_control,
+    is_paused,
+    publish_status,
+)
 from ..telegram import client_manager as cm
 from ..vpn_monitor import VpnMonitor
 
@@ -33,9 +39,17 @@ logger = logging.getLogger("storywatcher.combined")
 HEARTBEAT_PATH = os.environ.get("WORKER_HEARTBEAT", "/tmp/worker_heartbeat")
 MAX_CONSECUTIVE_ERRORS = int(os.environ.get("WORKER_MAX_ERRORS", "10"))
 # Seconds the main loop may go without completing a cycle before the watchdog
-# kills the process so Docker restarts it. The queue sweep itself is fast;
-# long discovery runs happen as a background task, so a stall is a real hang.
-STALL_TIMEOUT = float(os.environ.get("WORKER_STALL_TIMEOUT", "240"))
+# kills the process so Docker restarts it. The queue sweep and story sync are
+# wrapped in their own timeouts (see ACCOUNT_DRAIN_TIMEOUT and SYNC_TIMEOUT),
+# so this is a safety net for a genuinely wedged loop rather than the primary
+# hang detector — it must be comfortably larger than those wraps.
+STALL_TIMEOUT = float(os.environ.get("WORKER_STALL_TIMEOUT", "900"))
+# Hard cap for one story-sync cycle. A sync legitimately spends time inside
+# Telegram SearchPosts flood-waits, but an unbounded sync wedges the whole
+# loop (queue draining waits for it) with no way to recover except a process
+# restart. Cancelling the overrun cycle keeps the loop alive; the next cycle
+# retries.
+SYNC_TIMEOUT = float(os.environ.get("WORKER_SYNC_TIMEOUT", "600"))
 LOG_STALL_EVERY = 60.0
 
 # A discovery cycle is supposed to finish (flood-waits included). If it runs
@@ -46,16 +60,23 @@ DISCOVERY_WRAP_TIMEOUT = float(os.environ.get("WORKER_DISCOVERY_TIMEOUT", "1200"
 # Monotonic timestamp of the last completed main-loop cycle. Written by run(),
 # read by the watchdog thread. Zero means "loop hasn't ticked yet".
 _last_cycle_ts = 0.0
+_worker_started_at = 0.0
 
 
 def _write_heartbeat() -> None:
-    """Atomically write the current monotonic time to the heartbeat file."""
+    """Atomically write the current wall-clock time to the heartbeat file and
+    mirror it into Redis so other containers (backend/admin panel) can read it."""
+    ts = time.time()
     try:
         tmp = HEARTBEAT_PATH + ".tmp"
         with open(tmp, "w") as fh:
-            fh.write(str(time.time()))
+            fh.write(str(ts))
         os.replace(tmp, HEARTBEAT_PATH)
     except OSError:
+        pass
+    try:
+        _publish_heartbeat(ts)
+    except Exception:
         pass
 
 
@@ -163,6 +184,8 @@ def _cleanup_old_data() -> None:
 
 async def run() -> None:
     init_db()  # ensure tables exist even if the API hasn't booted yet
+    global _worker_started_at
+    _worker_started_at = time.time()
     sync_interval = float(os.environ.get("STORYWATCHER_SYNC_INTERVAL", "30"))
     poll_interval = float(os.environ.get("STORYWATCHER_WORKER_POLL", "1.0"))
     analytics_interval = float(os.environ.get("STORYWATCHER_ANALYTICS_INTERVAL", "3600"))
@@ -191,6 +214,7 @@ async def run() -> None:
             proxy_host=_settings.telegram_proxy_host,
             proxy_port=_settings.telegram_proxy_port or 1080,
             check_interval=float(os.environ.get("VPN_IP_CHECK_INTERVAL", "30")),
+            stability_checks=int(os.environ.get("VPN_IP_STABILITY_CHECKS", "2")),
         )
         logger.info("VPN IP monitor enabled (host=%s, interval=%ss)",
                      _settings.telegram_proxy_host, vpn_monitor._check_interval)
@@ -203,10 +227,35 @@ async def run() -> None:
         except Exception:
             logger.debug("shutdown_all during VPN IP change failed", exc_info=True)
 
+    restart_requested = False
     while True:
         _write_heartbeat()  # mark liveness at the top so healthcheck doesn't false-positive
         now = time.monotonic()
         cycle_had_error = False
+
+        # -1) Admin control flags: consume restart request, honor pause.
+        #     Pause skips Telegram-touching stages (queue/sync/analytics/discovery)
+        #     but keeps the loop + heartbeat alive so the worker shows as Running
+        #     (Paused) and can resume without a restart.
+        try:
+            ctrl = consume_control()
+            if ctrl.get("restart"):
+                logger.warning("restart requested via admin panel — initiating safe shutdown")
+                restart_requested = True
+            paused = is_paused()
+        except Exception:
+            logger.debug("worker control check failed", exc_info=True)
+            paused = False
+
+        if paused:
+            publish_status({
+                "running": True,
+                "paused": True,
+                "cycle_started": time.time(),
+            })
+            _write_heartbeat()
+            await asyncio.sleep(max(poll_interval, 2.0))
+            continue
 
         # 0) VPN IP healthcheck — proactively disconnect on IP change.
         if vpn_monitor is not None:
@@ -227,18 +276,39 @@ async def run() -> None:
             cycle_had_error = True
         _mark_cycle()  # queue drain completed → main loop is alive
 
+        # 1a) Release Telegram sessions of accounts that were deleted (admin
+        #     user/account deletion) so their phone numbers free up promptly.
+        try:
+            await scheduler.reconcile_orphaned_clients()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("orphaned client reconcile failed: %s", exc)
+
         # 2) Periodic cleanup of old VIEWED queue items and activity logs.
         if now - last_cleanup >= 3600:  # every hour
             try:
                 _cleanup_old_data()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("cleanup error: %s", exc)
+            # Automatic daily backup (cheap enabled-check, creates when due).
+            try:
+                from ..services.backup.auto import run_auto_backup_check
+
+                run_auto_backup_check()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("auto backup check error: %s", exc)
             last_cleanup = now
 
-        # 3) Periodic story sync (respects its own interval).
+        # 3) Periodic story sync (respects its own interval). Bounded by
+        #    SYNC_TIMEOUT so a long flood-wait chain inside sync_account cannot
+        #    stall the whole loop; a cancelled cycle is retried next interval.
         if now - last_sync >= sync_interval:
             try:
-                await scheduler.run_once()
+                await asyncio.wait_for(scheduler.run_once(), timeout=SYNC_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.critical(
+                    "scheduler cycle overran %.0fs — cancelling to keep the main loop alive",
+                    SYNC_TIMEOUT,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("scheduler cycle error: %s", exc)
                 cycle_had_error = True
@@ -310,8 +380,28 @@ async def run() -> None:
         else:
             consecutive_errors = 0
 
+        # Publish counters for the admin panel (best effort, every cycle).
+        try:
+            publish_status({
+                "running": True,
+                "paused": False,
+                "pid": os.getpid(),
+                "started_at": _worker_started_at,
+                "last_cycle_ts": _last_cycle_ts,
+                "consecutive_errors": consecutive_errors,
+            })
+        except Exception:
+            pass
+
         _write_heartbeat()  # also update after cycle completes
         _mark_cycle()
+        if restart_requested:
+            logger.warning("safe restart: draining and exiting (Docker restarts the worker)")
+            try:
+                await cm.shutdown_all()
+            except Exception:
+                pass
+            sys.exit(0)
         await asyncio.sleep(poll_interval)
 
 

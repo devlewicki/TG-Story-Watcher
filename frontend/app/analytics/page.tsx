@@ -133,7 +133,7 @@ export default function AnalyticsPage() {
                       <span className="font-medium">{event.username ? <a href={`https://t.me/${event.username}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline dark:text-emerald-400">@{event.username}</a> : [event.first_name, event.last_name].filter(Boolean).join(" ") || `User ${event.user_id}`}</span>
                       <span className="ml-2 text-slate-500"> {event.type === "reaction" ? t("analytics.reactedWith", { reaction: event.reaction || "" }) : t("analytics.viewedStory")}</span> <Link className="font-medium text-emerald-600 hover:underline" href={`/analytics/stories/${event.story_id}`}>#{event.telegram_story_id}</Link>
                     </div>
-                    <div className="text-xs text-slate-400">{new Date(event.occurred_at).toLocaleString(locale)}</div>
+                    <div className="text-xs text-slate-400">{new Date(event.occurred_at).toLocaleString(locale, { timeZone: "Europe/Moscow" })}</div>
                   </div>
                 </div>
               ))}
@@ -158,7 +158,7 @@ export default function AnalyticsPage() {
                   <span className="w-6 text-sm font-semibold text-slate-400">{index + 1}</span>
                   <span className="min-w-0 flex-1">
                     <span className="font-medium">Story #{story.telegram_story_id}</span>
-                    <span className="ml-3 text-xs text-slate-400">{story.published_at ? new Date(story.published_at).toLocaleString(locale) : ""}</span>
+                    <span className="ml-3 text-xs text-slate-400">{story.published_at ? new Date(story.published_at).toLocaleString(locale, { timeZone: "Europe/Moscow" }) : ""}</span>
                   </span>
                   <span className="text-sm text-slate-500"><Icon name="eye" className="mr-0.5 inline h-3.5 w-3.5 align-[-1px]" /> {story.views ?? "—"}</span>
                   <span className="text-sm text-slate-500"><Icon name="heart" className="mr-0.5 inline h-3.5 w-3.5 align-[-1px]" /> {story.reactions ?? "—"}</span>

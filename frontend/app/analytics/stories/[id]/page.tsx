@@ -56,7 +56,7 @@ export default function StoryAnalyticsPage() {
               <tbody>
                 {points.data.map((p, i) => (
                   <tr key={i} className="border-t border-slate-100 dark:border-slate-800">
-                    <td className="px-5 py-2">{new Date(p.collected_at).toLocaleString(locale)}</td>
+                    <td className="px-5 py-2">{new Date(p.collected_at).toLocaleString(locale, { timeZone: "Europe/Moscow" })}</td>
                     <td className="px-5 py-2">{p.views ?? "—"}</td>
                     <td className="px-5 py-2">{p.reactions ?? "—"}</td>
                     <td className="px-5 py-2">{p.forwards ?? "—"}</td>
@@ -102,7 +102,7 @@ export default function StoryAnalyticsPage() {
                           ? <a href={`https://t.me/${v.username}`} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline dark:text-emerald-400">@{v.username}</a>
                           : [v.first_name, v.last_name].filter(Boolean).join(" ") || `User ${v.telegram_user_id}`}
                       </div>
-                      {v.viewed_at && <div className="text-xs text-slate-400">{new Date(v.viewed_at).toLocaleString(locale)}</div>}
+                      {v.viewed_at && <div className="text-xs text-slate-400">{new Date(v.viewed_at).toLocaleString(locale, { timeZone: "Europe/Moscow" })}</div>}
                     </div>
                     {v.reaction && <span className="shrink-0 text-lg">{v.reaction}</span>}
                   </div>

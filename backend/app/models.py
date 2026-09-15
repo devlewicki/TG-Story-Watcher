@@ -93,6 +93,12 @@ class Story(Base):
     __tablename__ = "stories"
     __table_args__ = (
         UniqueConstraint("account_id", "peer_id", "telegram_story_id", name="uq_account_peer_story"),
+        Index("ix_stories_discovered_at", "discovered_at", postgresql_using="btree"),
+        Index("ix_stories_peer_id", "peer_id"),
+        Index("ix_stories_source", "source"),
+        Index("ix_stories_account_discovered", "account_id", "discovered_at"),
+        Index("ix_stories_author_username", "author_username"),
+        Index("ix_stories_author_name", "author_name"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -153,6 +159,9 @@ class StoryQueue(Base):
     __tablename__ = "story_queue"
     __table_args__ = (
         UniqueConstraint("account_id", "story_id", name="uq_queue_account_story"),
+        Index("ix_story_queue_story_id", "story_id"),
+        Index("ix_story_queue_account_status", "account_id", "status"),
+        Index("ix_story_queue_status_created", "status", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -178,6 +187,10 @@ class StoryView(Base):
     __tablename__ = "story_views"
     __table_args__ = (
         UniqueConstraint("account_id", "peer_id", "telegram_story_id", name="uq_view_account_peer_story"),
+        Index("ix_story_views_peer_id", "peer_id"),
+        Index("ix_story_views_story_id_status", "story_id", "status"),
+        Index("ix_story_views_viewed_at", "viewed_at"),
+        Index("ix_story_views_account_viewed", "account_id", "viewed_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

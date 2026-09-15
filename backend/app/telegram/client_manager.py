@@ -43,7 +43,7 @@ from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 
 from ..config import get_settings
-from ..models import AccountStatus
+from ..models import AccountStatus, TelegramAccount
 
 logger = logging.getLogger("storywatcher.telegram")
 settings = get_settings()
@@ -52,12 +52,26 @@ _clients: dict[int, TelegramClient] = {}
 _login_clients: dict[str, TelegramClient] = {}
 _login_states: dict[str, "LoginState"] = {}
 _login_started: dict[str, float] = {}
+_login_sent_at: dict[str, float] = {}
+_login_locks: dict[str, asyncio.Lock] = {}
 
 
 @dataclass
 class LoginState:
     sent: dict = field(default_factory=dict)
     needs_password: bool = False
+
+
+class CooldownError(RuntimeError):
+    """Raised when a login code was requested for this phone too recently."""
+
+    def __init__(self, phone: str, remaining: float):
+        self.phone = phone
+        self.remaining = float(remaining)
+        super().__init__(
+            "Код уже отправлен на этот номер. Повторите через "
+            f"{int(self.remaining)} сек."
+        )
 
 
 def _session_path(account_id: int) -> str:
@@ -243,6 +257,61 @@ async def drop_client(account_id: int):
     await release_client(account_id)
 
 
+def cached_account_ids() -> list[int]:
+    """Account ids with a live cached TelegramClient (any process-local copy)."""
+    return list(_clients)
+
+
+async def forget_account(account_id: int) -> None:
+    """Drop the cached client for ``account_id`` and delete its session files.
+
+    Used when the account row no longer exists (deleted user/account) so the
+    phone's Telegram authorization is released in this process instead of
+    lingering until a restart or VPN IP change.
+    """
+    await drop_client(account_id)
+    path = _session_path(account_id)
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        try:
+            os.remove(path + suffix)
+        except OSError:
+            pass
+
+
+async def mark_account_auth_required(
+    account_id: int, *, drop_session: bool = False
+) -> None:
+    """Mark an account as needing re-login (``AUTH_REQUIRED``).
+
+    Called when Telegram invalidates the account's auth key (logout /
+    ``AuthKeyUnregisteredError`` / ``AuthKeyDuplicatedError``). Stops monitoring
+    and drops the cached client. The dead ``session_path`` file is only removed
+    when ``drop_session=True`` (an invalidated/duplicated auth key) — for a
+    merely logged-out session it is kept so the re-login flow can reuse it.
+    """
+    from ..db import SessionLocal
+
+    await drop_client(account_id)
+    db = SessionLocal()
+    try:
+        acc = db.get(TelegramAccount, account_id)
+        if acc is not None:
+            acc.status = AccountStatus.AUTH_REQUIRED.value
+            acc.monitoring = False
+            if drop_session and acc.session_path and os.path.isfile(acc.session_path):
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    try:
+                        os.remove(acc.session_path + suffix)
+                    except OSError:
+                        pass
+                acc.session_path = None
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
 async def update_account_identity(account, client):
     me = await asyncio.wait_for(client.get_me(), timeout=120.0)
     if me:
@@ -292,6 +361,8 @@ async def shutdown_all():
         login = _login_clients.pop(phone, None)
         _login_states.pop(phone, None)
         _login_started.pop(phone, None)
+        _login_sent_at.pop(phone, None)
+        _login_locks.pop(phone, None)
         if login is not None:
             tasks.append(_release_login(login))
     if tasks:
@@ -312,19 +383,62 @@ def _login_api():
     return int(settings.telegram_api_id), settings.telegram_api_hash
 
 
+def _login_lock(phone: str) -> asyncio.Lock:
+    lock = _login_locks.get(phone)
+    if lock is None:
+        lock = _login_locks[phone] = asyncio.Lock()
+    return lock
+
+
+async def clear_login_state(phone: str) -> list[str]:
+    """Drop any in-memory login session tied to ``phone``.
+
+    Matches both the exact key and any key with the same canonical digits, so
+    a phone stored as ``+7999...`` is cleared when we look up ``7999...`` (and
+    vice versa). Used when a user is deleted so a later login attempt for the
+    same number starts from a clean slate instead of reusing a client whose
+    cached ``phone_code_hash`` would make Telethon send ``auth.resendCode``.
+    """
+    target = normalize_phone(phone)
+    keys = [
+        p for p in list(_login_clients)
+        if p == phone or (target and normalize_phone(p) == target)
+    ]
+    for p in keys:
+        login = _login_clients.pop(p, None)
+        _login_states.pop(p, None)
+        _login_started.pop(p, None)
+        _login_sent_at.pop(p, None)
+        _login_locks.pop(p, None)
+        if login is not None:
+            logger.info("clearing login state for %s", p)
+            try:
+                await login.disconnect()
+            except Exception:
+                logger.debug("login client disconnect during clear_login_state failed", exc_info=True)
+    return keys
+
+
 async def _ensure_login(phone: str):
     # Evict stale login sessions first so abandoned send-code flows don't leak
     # TelegramClient instances (each holds a live MTProto connection).
     await _evict_stale_logins()
-    client = _login_clients.get(phone)
-    if client is None:
-        api_id, api_hash = _login_api()
-        client = TelegramClient(StringSession(), api_id, api_hash, proxy=_get_proxy())
-        _login_clients[phone] = client
-        _login_states[phone] = LoginState()
-    _login_started[phone] = time.monotonic()
-    if not client.is_connected():
-        await client.connect()
+    now = time.monotonic()
+    last_sent = _login_sent_at.get(phone, 0.0)
+    if now - last_sent < SEND_CODE_COOLDOWN:
+        raise CooldownError(phone, SEND_CODE_COOLDOWN - (now - last_sent))
+    # ALWAYS start with a brand-new client and discard the previous one. Keeping
+    # a cached client with a live ``phone_code_hash`` makes Telethon's
+    # send_code_request() issue auth.resendCode on the second call, which
+    # Telegram rejects with SEND_CODE_UNAVAILABLE once the number's delivery
+    # options (flash-call, SMS) are exhausted — the exact "failed to send code"
+    # error users hit when re-connecting a number shortly after deleting a user.
+    await clear_login_state(phone)
+    api_id, api_hash = _login_api()
+    client = TelegramClient(StringSession(), api_id, api_hash, proxy=_get_proxy())
+    _login_clients[phone] = client
+    _login_states[phone] = LoginState()
+    _login_started[phone] = now
     return client
 
 
@@ -332,6 +446,12 @@ async def _ensure_login(phone: str):
 # abandons the login midway, an entry remains forever; the TTL below cleans
 # them up on the next login-related call.
 LOGIN_TTL = 600.0  # seconds; Telegram codes expire after ~2-3 min anyway
+
+# Minimum gap between two send-code requests for the same phone.  Telegram
+# rate-limits code delivery per number; asking again too soon exhausts the
+# delivery options (flash-call -> SMS) and Telegram then rejects every resend
+# with SEND_CODE_UNAVAILABLE.  The UI mirrors this with a visible countdown.
+SEND_CODE_COOLDOWN = 60.0  # seconds
 
 
 async def _evict_stale_logins():
@@ -341,6 +461,8 @@ async def _evict_stale_logins():
         login = _login_clients.pop(phone, None)
         _login_states.pop(phone, None)
         _login_started.pop(phone, None)
+        _login_sent_at.pop(phone, None)
+        _login_locks.pop(phone, None)
         if login is not None:
             logger.info("evicting stale login client for %s", phone)
             try:
@@ -350,29 +472,34 @@ async def _evict_stale_logins():
 
 
 async def auth_send_code(phone: str):
-    client = await _ensure_login(phone)
-    for attempt in range(4):
-        try:
-            if not client.is_connected():
-                await client.connect()
-            sent = await client.send_code_request(phone)
-            _login_states[phone].sent = {"phone_code_hash": getattr(sent, "phone_code_hash", None)}
-            return
-        except (ConnectionError, TimeoutError, OSError, RuntimeError, errors.AuthRestartError) as exc:
-            if attempt == 3:
-                raise
-            logger.info("Retrying send-code, connection error #%d: %s", attempt + 1, exc)
+    lock = _login_lock(phone)
+    async with lock:
+        client = await _ensure_login(phone)
+        for attempt in range(2):
             try:
-                await client.disconnect()
-            except Exception:
-                pass
-            api_id, api_hash = _login_api()
-            client = TelegramClient(StringSession(), api_id, api_hash, proxy=_get_proxy())
-            _login_clients[phone] = client
-            _login_states[phone] = LoginState()
-            _login_started[phone] = time.monotonic()
-            await asyncio.sleep(0.5)
-            await client.connect()
+                if not client.is_connected():
+                    await client.connect()
+                sent = await client.send_code_request(phone)
+                _login_states[phone].sent = {"phone_code_hash": getattr(sent, "phone_code_hash", None)}
+                _login_sent_at[phone] = time.monotonic()
+                return
+            except (ConnectionError, TimeoutError, OSError, errors.AuthRestartError) as exc:
+                if attempt == 1:
+                    raise
+                logger.info("Retrying send-code, connection error #%d: %s", attempt + 1, exc)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                # Fresh connection/session: never a resend with a stale hash.
+                await clear_login_state(phone)
+                api_id, api_hash = _login_api()
+                client = TelegramClient(StringSession(), api_id, api_hash, proxy=_get_proxy())
+                _login_clients[phone] = client
+                _login_states[phone] = LoginState()
+                _login_started[phone] = time.monotonic()
+                await asyncio.sleep(0.5)
+                await client.connect()
     raise RuntimeError("Telegram authorization could not be restarted")
 
 
@@ -396,6 +523,11 @@ async def auth_confirm_code(phone: str, code: str):
             return {"status": "invalid_code"}
         except errors.PhoneCodeExpiredError:
             return {"status": "code_expired"}
+        # Telegram's per-number delivery limits: retrying sign_in just makes the
+        # situation worse (Telethon may trigger another auth.resendCode), so
+        # surface it up for a friendly message instead of looping.
+        except (errors.SendCodeUnavailableError, errors.PhoneNumberFloodError, errors.FloodWaitError):
+            raise
         except (ConnectionError, TimeoutError, OSError, errors.RPCError) as exc:
             last_exc = exc
             logger.info("Retrying confirm-code, connection error #%d: %s", attempt + 1, exc)
@@ -421,6 +553,8 @@ async def finish_login(phone: str, account):
     login = _login_clients.pop(phone, None)
     _login_states.pop(phone, None)
     _login_started.pop(phone, None)
+    _login_sent_at.pop(phone, None)
+    _login_locks.pop(phone, None)
     if not login:
         raise ValueError("no active login session")
     try:

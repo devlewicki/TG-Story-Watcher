@@ -114,7 +114,7 @@ export default function StatisticsPage() {
   if (!data) return <Empty label={t("statistics.noData")} />;
 
   const dayData = data.views_by_day.map((d) => ({
-    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short" }),
+    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short", timeZone: "Europe/Moscow" }),
     count: d.count,
   }));
   const hourData = data.views_by_hour.map((h) => ({

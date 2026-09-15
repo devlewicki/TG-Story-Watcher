@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Sidebar, TopBar } from "@/components/Sidebar";
 import { TokenGateContent } from "@/components/TokenGate";
-import { getToken } from "@/lib/api";
+import { TelegramAuthModal } from "@/components/TelegramAuthModal";
+import { SHELL_CONTENT_OFFSET_CLASSES, SHELL_MAIN_CLASSES } from "@/components/shellLayout";
+import { api, getToken, type Account } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 
 const UNAUTHORIZED_EVENT = "storywatcher:unauthorized";
@@ -26,13 +28,13 @@ function BottomNav() {
   const pathname = usePathname();
   const BOTTOM_NAV = useBottomNav();
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-30 flex items-center justify-around border-t border-slate-200/80 bg-white/90 backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/90 md:hidden" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+    <nav className="fixed inset-x-0 bottom-0 z-30 flex items-stretch border-t border-slate-200/80 bg-white/90 backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/90 md:hidden" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
       {BOTTOM_NAV.map((item) => {
         const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
         return (
-          <Link key={item.href} href={item.href} className={`flex flex-col items-center gap-0.5 px-3 py-2 text-[10px] font-medium transition-colors ${active ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}`}>
+          <Link key={item.href} href={item.href} className={`flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[10px] font-medium transition-colors ${active ? "text-emerald-600 dark:text-emerald-400" : "text-slate-500 dark:text-slate-400"}`}>
             {item.icon}
-            <span>{item.label}</span>
+            <span className="max-w-full truncate text-center whitespace-nowrap">{item.label}</span>
           </Link>
         );
       })}
@@ -42,6 +44,8 @@ function BottomNav() {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [hasToken, setHasToken] = useState(false);
+  const [showConnect, setShowConnect] = useState(false);
+  const connectCheckDone = useRef(false);
 
   useEffect(() => {
     const token = getToken();
@@ -62,6 +66,25 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // After a fresh registration (or at the next login with no Telegram account
+  // connected yet), prompt the user to connect Telegram right away.
+  useEffect(() => {
+    if (!hasToken || connectCheckDone.current) return;
+    connectCheckDone.current = true;
+    let cancelled = false;
+    api
+      .get<Account[]>("/accounts")
+      .then((accounts) => {
+        if (!cancelled && (!accounts || accounts.length === 0)) {
+          setShowConnect(true);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hasToken]);
+
   if (!hasToken) {
     return <TokenGateContent onSaved={() => setHasToken(!!getToken())} />;
   }
@@ -69,11 +92,20 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen">
       <Sidebar />
-      <div className="md:pl-64">
+      <div className={SHELL_CONTENT_OFFSET_CLASSES}>
         <TopBar />
-        <main className="mx-auto max-w-6xl px-4 pb-24 pt-4 sm:px-6 sm:py-6">{children}</main>
+        <main className={SHELL_MAIN_CLASSES}>{children}</main>
       </div>
       <BottomNav />
+      {showConnect && (
+        <TelegramAuthModal
+          onClose={() => setShowConnect(false)}
+          onDone={() => {
+            setShowConnect(false);
+            window.dispatchEvent(new Event("storywatcher:account-updated"));
+          }}
+        />
+      )}
     </div>
   );
 }
