@@ -21,7 +21,9 @@ CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
 # Hard ceiling for one account's discovery work. Covers connect, contact sync,
 # identity refresh and every search in this cycle; anything longer is a hang
 # (half-open TCP through a dropped tunnel) and gets aborted.
-DISCOVERY_ACCOUNT_TIMEOUT = 300
+# Increased from 300 to 600 — with 30+ hashtags at 3.5s each, accounts
+# need ~150s for hashtags alone plus geo/connect overhead.
+DISCOVERY_ACCOUNT_TIMEOUT = 600
 
 from ..db import SessionLocal
 from ..models import AccountStatus, TelegramAccount
@@ -400,30 +402,24 @@ async def run_discovery_once() -> None:
     finally:
         read_db.close()
 
-    # Round-robin: pick one account per user per iteration so that a single
-    # large user (500+ hashtags) does not block smaller users.
-    # Build per-user buckets.
-    user_buckets: dict[int, list[tuple[TelegramAccount, dict]]] = {}
-    for acc, cfg in pending:
-        user_buckets.setdefault(acc.user_id or 0, []).append((acc, cfg))
-    while user_buckets:
-        exhausted = []
-        for uid_bucket, items in user_buckets.items():
-            if not items:
-                exhausted.append(uid_bucket)
-                continue
-            acc, cfg = items.pop(0)
-            try:
-                await asyncio.wait_for(
-                    _discover_account(acc, cfg), timeout=DISCOVERY_ACCOUNT_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "discover_account(%s) timed out after %ss — aborting this account's cycle",
-                    acc.id, DISCOVERY_ACCOUNT_TIMEOUT,
-                )
-        for uid_bucket in exhausted:
-            del user_buckets[uid_bucket]
+    # Run discovery for all pending accounts in parallel (one asyncio task
+    # per account) so that a slow account does not block others.  Each task
+    # is individually bounded by DISCOVERY_ACCOUNT_TIMEOUT.
+    async def _run_one(acc: TelegramAccount, cfg: dict) -> None:
+        try:
+            await asyncio.wait_for(
+                _discover_account(acc, cfg), timeout=DISCOVERY_ACCOUNT_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "discover_account(%s) timed out after %ss — aborting this account's cycle",
+                acc.id, DISCOVERY_ACCOUNT_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("discover_account(%s) failed: %s", acc.id, exc)
+
+    if pending:
+        await asyncio.gather(*[_run_one(acc, cfg) for acc, cfg in pending])
 
 
 async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
