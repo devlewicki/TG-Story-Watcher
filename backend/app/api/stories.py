@@ -107,6 +107,11 @@ def list_stories(
     liked: dict[tuple[int, int], str] = {}
     story_account_ids = list({s.account_id for s in stories})
     if story_account_ids:
+        # Build a set of (peer_id, story_id) pairs from the current page
+        # so we can filter likes more precisely in Python.
+        page_pairs = {(s.peer_id, s.telegram_story_id) for s in stories}
+        # Limit the scan: at most 2000 rows is more than enough for a single
+        # page of 100-500 stories (likes are rare relative to story count).
         for a in (
             db.query(ActivityLog)
             .filter(
@@ -114,7 +119,7 @@ def list_stories(
                 ActivityLog.account_id.in_(story_account_ids),
             )
             .order_by(ActivityLog.created_at.desc())
-            .limit(5000)
+            .limit(2000)
             .all()
         ):
             try:
@@ -124,7 +129,10 @@ def list_stories(
             pid = meta.get("peer_id")
             sid = meta.get("story_id")
             if pid is not None and sid is not None:
-                liked.setdefault((int(pid), int(sid)), meta.get("emoji") or "👍")
+                key = (int(pid), int(sid))
+                # Only keep likes for stories on this page.
+                if key in page_pairs:
+                    liked.setdefault(key, meta.get("emoji") or "👍")
 
     out = []
     for s in stories:

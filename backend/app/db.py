@@ -62,6 +62,40 @@ def _run_migrations() -> None:
         except Exception as e:
             logger.debug("Migration: stage skip — %s", e)
 
+        # --- Performance indexes for stories browsing/searching/marking ---
+        _perf_indexes = [
+            # stories: sort by discovered_at (main listing ORDER BY)
+            "CREATE INDEX IF NOT EXISTS ix_stories_discovered_at ON stories(discovered_at DESC)",
+            # stories: WHERE filters on peer_id and source
+            "CREATE INDEX IF NOT EXISTS ix_stories_peer_id ON stories(peer_id)",
+            "CREATE INDEX IF NOT EXISTS ix_stories_source ON stories(source)",
+            # stories: compound index for account+discovered (listing per user)
+            "CREATE INDEX IF NOT EXISTS ix_stories_account_discovered ON stories(account_id, discovered_at DESC)",
+            # stories: author search (ILIKE on username/name)
+            "CREATE INDEX IF NOT EXISTS ix_stories_author_username ON stories(author_username)",
+            "CREATE INDEX IF NOT EXISTS ix_stories_author_name ON stories(author_name)",
+            # story_views: WHERE peer_id, GROUP BY telegram_story_id, ORDER BY viewed_at
+            "CREATE INDEX IF NOT EXISTS ix_story_views_peer_id ON story_views(peer_id)",
+            "CREATE INDEX IF NOT EXISTS ix_story_views_story_id_status ON story_views(story_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_story_views_viewed_at ON story_views(viewed_at)",
+            "CREATE INDEX IF NOT EXISTS ix_story_views_account_viewed ON story_views(account_id, viewed_at)",
+            # story_queue: FK story_id (no auto FK index), compound status+created
+            "CREATE INDEX IF NOT EXISTS ix_story_queue_story_id ON story_queue(story_id)",
+            "CREATE INDEX IF NOT EXISTS ix_story_queue_account_status ON story_queue(account_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_story_queue_status_created ON story_queue(status, created_at DESC)",
+            # activity_logs: compound for likes lookup (event_type + account_id)
+            "CREATE INDEX IF NOT EXISTS ix_activity_event_account ON activity_logs(event_type, account_id)",
+            # activity_logs: story_skipped dedup scan
+            "CREATE INDEX IF NOT EXISTS ix_activity_skip_dedup ON activity_logs(event_type, account_id, created_at DESC)",
+        ]
+        for stmt in _perf_indexes:
+            try:
+                conn.execute(text(stmt))
+            except Exception as e:
+                logger.debug("Migration: index skip (%s): %s", stmt.split("ON ")[1] if "ON " in stmt else stmt, e)
+        else:
+            logger.info("Migration: applied %d performance indexes", len(_perf_indexes))
+
         # Reset lock_timeout
         try:
             conn.execute(text("RESET lock_timeout"))
