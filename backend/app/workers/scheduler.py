@@ -461,7 +461,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         all_locations = list(cfg.get("locations") or [])
         # Rotate through hashtags: search at most `hashtag_budget` per cycle
         # to avoid flooding Telegram with too many SearchPosts requests.
-        hashtag_budget = max(5, min(30, len(all_hashtags) // 10 + 5))
+        hashtag_budget = max(5, min(80, len(all_hashtags) // 10 + 5))
         uid = account.user_id or 0
         if all_hashtags:
             h_offset = _hashtag_offset.get(uid, 0) % len(all_hashtags)

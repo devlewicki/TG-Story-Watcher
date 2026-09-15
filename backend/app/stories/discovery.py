@@ -49,7 +49,7 @@ RPC_TIMEOUT = 120.0
 # scheduler's rotation offsets advance every cycle regardless, so venues we
 # skip here simply come around again a few cycles later.
 SEARCH_POSTS_MIN_INTERVAL = 6.0
-SEARCH_POSTS_CYCLE_BUDGET = 30
+SEARCH_POSTS_CYCLE_BUDGET = 120
 
 _search_rpc_last: dict[int, float] = {}
 _search_rpc_cycle_budget: dict[int, int] = {}
