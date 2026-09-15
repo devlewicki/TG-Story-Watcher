@@ -29,7 +29,7 @@ def logged_out_user(engine, admin_db):
         TelegramAccount,
         User,
     )
-    from app.security import hash_password
+    from app.multitenancy import hash_password
 
     session = sessionmaker(bind=engine)()
     try:
