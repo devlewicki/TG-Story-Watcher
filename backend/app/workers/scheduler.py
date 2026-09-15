@@ -459,9 +459,11 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         limit = int(cfg.get("search_results_max", 50))
         all_hashtags = cfg.get("hashtags") or [] if cfg.get("hashtags_enabled", True) else []
         all_locations = list(cfg.get("locations") or [])
-        # Rotate through hashtags: search at most `hashtag_budget` per cycle
-        # to avoid flooding Telegram with too many SearchPosts requests.
-        hashtag_budget = max(5, min(80, len(all_hashtags) // 10 + 5))
+        # Rotate through hashtags: search at most `hashtag_budget` per cycle.
+        # With SEARCH_POSTS_MIN_INTERVAL=3.5s, each hashtag costs ~3.5s.
+        # Aim to search ~30 hashtags per cycle (≈105s) so all hashtags are
+        # covered in 2-3 cycles even with 100+ tags.
+        hashtag_budget = max(10, min(100, len(all_hashtags) // 3 + 10))
         uid = account.user_id or 0
         if all_hashtags:
             h_offset = _hashtag_offset.get(uid, 0) % len(all_hashtags)
@@ -471,7 +473,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             hashtags = []
         # Same for locations: rotate through them with a budget to prevent
         # one user with thousands of venues from starving others.
-        location_budget = max(5, min(30, len(all_locations) // 10 + 5))
+        location_budget = max(10, min(50, len(all_locations) // 5 + 10))
         auto_locations: list[str] = []
         # When auto-add is enabled, rotate through ALL collected geo places,
         # searching at most ``searches_per_hour`` of them per cycle.
@@ -564,7 +566,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
 
         # Apply budget to geo venues: rotate through them in batches
         # to avoid flooding Telegram with hundreds of requests per cycle.
-        geo_budget = max(5, min(30, len(geo_venues) // 10 + 5)) if geo_venues else 0
+        geo_budget = max(10, min(50, len(geo_venues) // 5 + 10)) if geo_venues else 0
         if geo_venues and geo_budget > 0:
             full_geo_count = len(geo_venues)
             g_offset = _geo_venue_offset.get(uid, 0) % full_geo_count
