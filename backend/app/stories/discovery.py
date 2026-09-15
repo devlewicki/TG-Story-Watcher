@@ -40,6 +40,20 @@ RESULT_LIMIT = 50
 # starve every future discovery cycle.
 RPC_TIMEOUT = 120.0
 
+# --- SearchPosts pacing ---
+# stories.searchPosts is one of Telegram's most aggressively rate-limited
+# methods. Left unpaced, one discovery cycle fires ~70 venue/hashtag queries
+# per account back-to-back and instantly trips the flood ceiling — Telegram
+# then answers with empty pages instead of an error. Throttle RPCs per
+# account: a minimum gap between calls and a hard budget per cycle. The
+# scheduler's rotation offsets advance every cycle regardless, so venues we
+# skip here simply come around again a few cycles later.
+SEARCH_POSTS_MIN_INTERVAL = 6.0
+SEARCH_POSTS_CYCLE_BUDGET = 20
+
+_search_rpc_last: dict[int, float] = {}
+_search_rpc_cycle_budget: dict[int, int] = {}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -59,22 +73,46 @@ def _connected(monitor: StoryMonitor) -> bool:
         return False
 
 
-# Flood-wait cooldown per account. stories.searchPosts is one of Telegram's
-# most aggressively rate-limited methods; once it floods, every subsequent
-# venue/hashtag in the same cycle hits the same cap. Instead of sleeping
-# ~30s per leftover entry (minutes of dead time per cycle), remember the
-# cooldown and abort the rest of the cycle, then re-try on a later cycle.
-_flood_cooldown_until: dict[int, float] = {}
+# Flood-hit counter per account. stories.searchPosts is aggressively
+# rate-limited; the first FloodWaitError in a cycle is slept through (the
+# search list keeps going), and only a second one within the same cycle stops
+# the account's work. Allowed to decay across cycles via _reset_pacing.
+_flood_hits: dict[int, int] = {}
 
 
-def _remember_flood(monitor: StoryMonitor, seconds: float) -> None:
-    """Record that this account is flood-limited for ``seconds`` more."""
-    _flood_cooldown_until[monitor.account.id] = time.monotonic() + max(float(seconds), 0.0)
+def _reset_pacing(monitor: StoryMonitor) -> None:
+    """Start a fresh pacing budget and flood-hit counter for this account."""
+    _search_rpc_cycle_budget[monitor.account.id] = SEARCH_POSTS_CYCLE_BUDGET
+    _flood_hits.pop(monitor.account.id, None)
 
 
-def _flood_pending(monitor: StoryMonitor) -> bool:
-    """True if the account is still inside a remembered flood cooldown."""
-    return time.monotonic() < _flood_cooldown_until.get(monitor.account.id, 0.0)
+def _search_slots_left(monitor: StoryMonitor) -> int:
+    # Unset (e.g. when called directly) means a full budget: default it so a
+    # bare search outside the scheduler loop still works.
+    return _search_rpc_cycle_budget.get(monitor.account.id, SEARCH_POSTS_CYCLE_BUDGET)
+
+
+async def _acquire_search_slot(monitor: StoryMonitor) -> bool:
+    """Wait out the per-account interval and consume one SearchPosts slot.
+
+    Returns False when this account's per-cycle budget is exhausted, in which
+    case the caller should stop issuing further searches this cycle.
+    """
+    acc_id = monitor.account.id
+    if _search_slots_left(monitor) <= 0:
+        logger.info(
+            "discovery: account %s SearchPosts budget exhausted — skipping rest of cycle",
+            acc_id,
+        )
+        return False
+    now = time.monotonic()
+    last = _search_rpc_last.get(acc_id, 0.0)
+    wait = SEARCH_POSTS_MIN_INTERVAL - (now - last)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _search_rpc_last[acc_id] = time.monotonic()
+    _search_rpc_cycle_budget[acc_id] = _search_slots_left(monitor) - 1
+    return True
 
 
 def _geo_point_from_text(text: str) -> types.GeoPoint | None:
@@ -107,14 +145,13 @@ async def search_hashtags(
         tag = tag.strip().lstrip("#")
         if not tag:
             continue
+        # SearchPosts is heavily rate-limited: once the per-cycle budget runs
+        # out, stop issuing further queries (rotation re-covers them later).
+        if _search_slots_left(monitor) <= 0:
+            break
         # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
         if not _connected(monitor):
             logger.info("discovery: client disconnected — aborting hashtag search")
-            break
-        # Account is still inside a flood cooldown from an earlier search this
-        # (or a previous) cycle: skip the rest instead of re-hitting the cap.
-        if _flood_pending(monitor):
-            logger.info("discovery: flood cooldown active — aborting hashtag search")
             break
         try:
             count = await _search_posts(monitor, hashtag=tag, limit=limit)
@@ -138,11 +175,14 @@ async def search_hashtags(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            # Wait out the flood once, remember the cooldown, then stop this
-            # cycle — the remaining tags would only re-trigger the same cap.
-            _remember_flood(monitor, e.seconds)
+            # Wait once and carry on with the next tag; only a second flood in
+            # the same cycle stops the list — one transient wait must not
+            # abort the whole account's work.
+            _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
             await asyncio.sleep(min(e.seconds, 30))
-            break
+            if _flood_hits[monitor.account.id] >= 2:
+                logger.info("discovery #%s: repeated flood — stopping hashtag search", tag)
+                break
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery #%s failed: %s", tag, exc)
             activity.log(
@@ -170,13 +210,13 @@ async def search_locations(
         loc = loc.strip()
         if not loc:
             continue
+        # SearchPosts is heavily rate-limited: once the per-cycle budget runs
+        # out, stop issuing further queries (rotation re-covers them later).
+        if _search_slots_left(monitor) <= 0:
+            break
         # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
         if not _connected(monitor):
             logger.info("discovery: client disconnected — aborting location search")
-            break
-        # Account is still inside a flood cooldown: skip the rest of the list.
-        if _flood_pending(monitor):
-            logger.info("discovery: flood cooldown active — aborting location search")
             break
         # Cities are resolved specially: try a collected venue with a matching
         # title first, otherwise fall back to a hashtag search with the city
@@ -216,11 +256,13 @@ async def search_locations(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            # Wait out the flood once, remember the cooldown, then stop this
-            # cycle — the remaining venues would only re-trigger the same cap.
-            _remember_flood(monitor, e.seconds)
+            # Wait once and carry on with the next venue; only a second flood
+            # in the same cycle stops the list.
+            _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
             await asyncio.sleep(min(e.seconds, 30))
-            break
+            if _flood_hits[monitor.account.id] >= 2:
+                logger.info("discovery geo '%s': repeated flood — stopping location search", loc)
+                break
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery geo '%s' failed: %s", loc, exc)
             activity.log(
@@ -267,7 +309,7 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
                 return count
             except errors.FloodWaitError as e:
                 logger.warning("discovery geo '%s' flood wait %ss", city, e.seconds)
-                _remember_flood(monitor, e.seconds)
+                _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
                 return 0
             except Exception as exc:  # noqa: BLE001
                 logger.warning("discovery geo '%s' via place failed: %s", city, exc)
@@ -288,7 +330,7 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
         return count
     except errors.FloodWaitError as e:
         logger.warning("discovery city '%s' flood wait %ss", city, e.seconds)
-        _remember_flood(monitor, e.seconds)
+        _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.warning("discovery city '%s' hashtag search failed: %s", city, exc)
@@ -368,6 +410,8 @@ async def _search_posts(
     while True:
         if not _connected(monitor):
             logger.info("discovery: client disconnected — aborting pagination of current search")
+            break
+        if not await _acquire_search_slot(monitor):
             break
         pages += 1
         # Bound pagination by pages: expired stories never count toward

@@ -518,7 +518,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
                 auto = [r[0] for r in place_vids]
             if auto:
                 start = _auto_venue_offset.get(uid, 0) % len(auto)
-                auto_locations = [f"venue:{vid}" for vid in auto[start:start + auto_budget]]
+                auto_locations = [f"venue:{vid}" for vid in (auto[start:] + auto[:start])[:auto_budget]]
                 _auto_venue_offset[uid] = (start + auto_budget) % len(auto)
         # Rotate through manually-configured locations.
         if all_locations:
@@ -593,6 +593,8 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         # venues, but geo_venues overlaps with both, so one venue would
         # otherwise be searched up to three times in a single cycle.
         locations = _dedupe_locations(locations)
+        # Give this account a fresh SearchPosts pacing budget for the cycle.
+        discovery._reset_pacing(monitor)
         # Geolocation first: it is the primary discovery mode and may be slow,
         # so big hashtag lists must not starve it.
         if locations:
