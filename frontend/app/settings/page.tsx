@@ -31,6 +31,10 @@ type SectionDef = {
   description: string;
   icon: IconName;
   fields: Record<string, FieldDef>;
+  // When set, the fields are read/written under this settings section key
+  // instead of the visual section name (used for the "Additional settings"
+  // card that hosts the Telegram API credentials).
+  storageSection?: string;
 };
 
 // The discovery section is managed on its own page (Story Search).
@@ -53,24 +57,6 @@ function useSections(): Record<string, SectionDef> {
             { value: "en", label: "English" },
           ],
         },
-        timezone: {
-          label: t("settings.sections.general.fields.timezone.label"),
-          description: t("settings.sections.general.fields.timezone.description"),
-          type: "text",
-          command: {
-            label: t("settings.sections.general.fields.timezone.autoDetect"),
-            detect: () =>
-              Intl.DateTimeFormat().resolvedOptions().timeZone ?? "",
-          },
-        },
-        theme: {
-          label: t("settings.sections.general.fields.theme.label"),
-          type: "select",
-          options: [
-            { value: "dark", label: t("settings.sections.general.fields.theme.dark") },
-            { value: "light", label: t("settings.sections.general.fields.theme.light") },
-          ],
-        },
         autostart: {
           label: t("settings.sections.general.fields.autostart.label"),
           description: t("settings.sections.general.fields.autostart.description"),
@@ -83,8 +69,6 @@ function useSections(): Record<string, SectionDef> {
       description: t("settings.sections.telegram.description"),
       icon: "send",
       fields: {
-        api_id: { label: t("settings.sections.telegram.fields.apiId.label"), type: "text", sensitive: true },
-        api_hash: { label: t("settings.sections.telegram.fields.apiHash.label"), type: "text", sensitive: true },
         reconnect: {
           label: t("settings.sections.telegram.fields.reconnect.label"),
           description: t("settings.sections.telegram.fields.reconnect.description"),
@@ -189,6 +173,16 @@ function useSections(): Record<string, SectionDef> {
         include_blocked: { label: t("settings.sections.filters.fields.includeBlocked.label"), type: "bool" },
       },
     },
+    additional: {
+      title: t("settings.sections.additional.title"),
+      description: t("settings.sections.additional.description"),
+      icon: "gear",
+      storageSection: "telegram",
+      fields: {
+        api_id: { label: t("settings.sections.telegram.fields.apiId.label"), type: "text", sensitive: true },
+        api_hash: { label: t("settings.sections.telegram.fields.apiHash.label"), type: "text", sensitive: true },
+      },
+    },
   };
 }
 
@@ -270,7 +264,7 @@ export default function SettingsPage() {
       {error && <ErrorBanner message={error} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {Object.entries(SECTIONS).filter(([k]) => !HIDDEN_SECTIONS.has(k)).map(([sectionKey, section]) => (
+        {Object.entries(SECTIONS).filter(([k]) => !HIDDEN_SECTIONS.has(k) && k !== "additional").map(([sectionKey, section]) => (
           <Card key={sectionKey}>
             <CardHeader
               title={
@@ -285,13 +279,14 @@ export default function SettingsPage() {
             />
             <div className="space-y-4 p-5">
         {Object.entries(section.fields).map(([key, def]) => {
-          const value = all[sectionKey]?.[key];
+          const storage = section.storageSection ?? sectionKey;
+          const value = all[storage]?.[key];
           return (
             <FieldRow
               key={key}
               def={def}
               value={value}
-              onChange={(v) => setField(sectionKey, key, v)}
+              onChange={(v) => setField(storage, key, v)}
             />
           );
         })}
@@ -299,6 +294,35 @@ export default function SettingsPage() {
           </Card>
         ))}
       </div>
+
+      {Object.entries(SECTIONS).filter(([k]) => false).map(([sectionKey, section]) => {
+        const storage = section.storageSection ?? sectionKey;
+        return (
+          <Card key={sectionKey} className="border-dashed border-slate-300 dark:border-slate-700">
+            <CardHeader
+              title={
+                <span className="flex items-center gap-2">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                    <Icon name={section.icon} className="h-4 w-4" />
+                  </span>
+                  {section.title}
+                </span>
+              }
+              subtitle={section.description}
+            />
+            <div className="space-y-4 p-5">
+              {Object.entries(section.fields).map(([key, def]) => (
+                <FieldRow
+                  key={key}
+                  def={def}
+                  value={all[storage]?.[key]}
+                  onChange={(v) => setField(storage, key, v)}
+                />
+              ))}
+            </div>
+          </Card>
+        );
+      })}
 
       <p className="text-xs text-slate-400 dark:text-slate-500">
         {t("settings.searchHint")}{" "}

@@ -6,6 +6,7 @@ import { useFetch } from "@/lib/useFetch";
 import { useTranslation } from "@/lib/i18n";
 import { Button, Card, CardHeader, Empty, ErrorBanner, Icon, IconButton, PageHeader, PageLoading } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 
 export function ListManager({ title, kind }: { title: string; kind: "whitelist" | "blacklist" }) {
   const { t } = useTranslation();
@@ -18,13 +19,16 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
   const [peerId, setPeerId] = useState("");
   const [comment, setComment] = useState("");
 
+  const [actionError, setActionError] = useState("");
+
   const add = async () => {
+    setActionError("");
     try {
       const validAccounts = accounts ?? [];
       const chosen = validAccounts.find((a) => String(a.id) === accountId) ?? validAccounts[0];
       const account_id = chosen?.id ?? null;
       if (account_id === null) {
-        alert(t("listManager.noAccount"));
+        setActionError(t("listManager.noAccount"));
         return;
       }
       const normalizedUsername = username.trim().replace(/^@+/, "");
@@ -39,16 +43,17 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
       setComment("");
       refresh();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
   };
 
   const remove = async (id: number) => {
+    setActionError("");
     try {
       await api.delete(`/${kind}/${id}`);
       refresh();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
   };
 
@@ -59,6 +64,8 @@ export function ListManager({ title, kind }: { title: string; kind: "whitelist" 
   return (
     <div className="space-y-4">
       <PageHeader title={title} />
+
+      {actionError && <ErrorBanner message={actionError} />}
 
       <Card className="p-4">
         <CardHeader title={t("listManager.addRecord")} />

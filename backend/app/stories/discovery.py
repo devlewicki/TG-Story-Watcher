@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 from telethon import errors, functions, types
@@ -39,9 +40,91 @@ RESULT_LIMIT = 50
 # starve every future discovery cycle.
 RPC_TIMEOUT = 120.0
 
+# --- SearchPosts pacing ---
+# stories.searchPosts is one of Telegram's most aggressively rate-limited
+# methods. Left unpaced, one discovery cycle fires ~70 venue/hashtag queries
+# per account back-to-back and instantly trips the flood ceiling — Telegram
+# then answers with empty pages instead of an error. Throttle RPCs per
+# account: a minimum gap between calls and a hard budget per cycle. The
+# scheduler's rotation offsets advance every cycle regardless, so venues we
+# skip here simply come around again a few cycles later.
+SEARCH_POSTS_MIN_INTERVAL = 3.5
+SEARCH_POSTS_CYCLE_BUDGET = 180
+
+_search_rpc_last: dict[int, float] = {}
+_search_rpc_cycle_budget: dict[int, int] = {}
+
+# --- Empty-result dedup ---
+# Telegram silently returns empty pages when rate-limited (no FloodWaitError).
+# Cache (hashtag -> last_processed_count) per account so we can skip hashtags
+# that returned 0 in the previous cycle — they are almost certainly rate-limited
+# rather than genuinely empty, and re-querying them wastes budget + time.
+_empty_result_cache: dict[int, dict[str, int]] = {}  # {account_id: {tag: last_count}}
+EMPTY_CACHE_TTL = 2  # skip a hashtag for at most N cycles before retrying
+_empty_cycle_counter: dict[int, int] = {}  # {account_id: cycle_counter}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _connected(monitor: StoryMonitor) -> bool:
+    """Cheap local check that the Telethon client is still connected.
+
+    Called before (and between) Telegram RPCs so that a VPN-level disconnect
+    aborts the discovery cycle immediately instead of burning hundreds of
+    failing ``SearchPosts`` requests ("Cannot send requests while
+    disconnected") across the rest of the cycle.
+    """
+    try:
+        return bool(monitor.client.is_connected())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# Flood-hit counter per account. stories.searchPosts is aggressively
+# rate-limited; the first FloodWaitError in a cycle is slept through (the
+# search list keeps going), and only a second one within the same cycle stops
+# the account's work. Allowed to decay across cycles via _reset_pacing.
+_flood_hits: dict[int, int] = {}
+
+
+def _reset_pacing(monitor: StoryMonitor) -> None:
+    """Start a fresh pacing budget and flood-hit counter for this account."""
+    _search_rpc_cycle_budget[monitor.account.id] = SEARCH_POSTS_CYCLE_BUDGET
+    _flood_hits.pop(monitor.account.id, None)
+    # Advance the empty-result cycle counter so stale skips expire.
+    acc_id = monitor.account.id
+    _empty_cycle_counter[acc_id] = _empty_cycle_counter.get(acc_id, 0) + 1
+
+
+def _search_slots_left(monitor: StoryMonitor) -> int:
+    # Unset (e.g. when called directly) means a full budget: default it so a
+    # bare search outside the scheduler loop still works.
+    return _search_rpc_cycle_budget.get(monitor.account.id, SEARCH_POSTS_CYCLE_BUDGET)
+
+
+async def _acquire_search_slot(monitor: StoryMonitor) -> bool:
+    """Wait out the per-account interval and consume one SearchPosts slot.
+
+    Returns False when this account's per-cycle budget is exhausted, in which
+    case the caller should stop issuing further searches this cycle.
+    """
+    acc_id = monitor.account.id
+    if _search_slots_left(monitor) <= 0:
+        logger.info(
+            "discovery: account %s SearchPosts budget exhausted — skipping rest of cycle",
+            acc_id,
+        )
+        return False
+    now = time.monotonic()
+    last = _search_rpc_last.get(acc_id, 0.0)
+    wait = SEARCH_POSTS_MIN_INTERVAL - (now - last)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _search_rpc_last[acc_id] = time.monotonic()
+    _search_rpc_cycle_budget[acc_id] = _search_slots_left(monitor) - 1
+    return True
 
 
 def _geo_point_from_text(text: str) -> types.GeoPoint | None:
@@ -70,23 +153,48 @@ async def search_hashtags(
 ) -> int:
     """Search stories by hashtags and feed them into the monitor pipeline."""
     processed = 0
+    acc_id = monitor.account.id
+    cache = _empty_result_cache.setdefault(acc_id, {})
+    cycle = _empty_cycle_counter.get(acc_id, 0)
+    skipped_empty = 0
     for tag in hashtags:
         tag = tag.strip().lstrip("#")
         if not tag:
             continue
+        # Skip hashtags that returned 0 in the last cycle — they are likely
+        # rate-limited (Telegram returns empty pages instead of FloodWaitError).
+        # Re-try after EMPTY_CACHE_TTL cycles so genuinely dead hashtags are
+        # eventually re-evaluated.
+        last_count = cache.get(tag)
+        if last_count == 0 and cycle - cache.get(f"_{tag}_cycle", 0) < EMPTY_CACHE_TTL:
+            skipped_empty += 1
+            continue
+        # SearchPosts is heavily rate-limited: once the per-cycle budget runs
+        # out, stop issuing further queries (rotation re-covers them later).
+        if _search_slots_left(monitor) <= 0:
+            break
+        # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
+        if not _connected(monitor):
+            logger.info("discovery: client disconnected — aborting hashtag search")
+            break
         try:
             count = await _search_posts(monitor, hashtag=tag, limit=limit)
             processed += count
-            # Only log real finds — per-search "0 stories" entries would flood
-            # the activity feed (thousands of venues are searched per cycle).
+            # Track empty results for dedup.
+            cache[tag] = count
+            cache[f"_{tag}_cycle"] = cycle
             if count:
                 activity.log(
                     f"Discovery hashtag #{tag}: {count} stories processed",
                     event_type="discovery_hashtag",
-                    account_id=monitor.account.id,
+                    account_id=acc_id,
                     metadata={"hashtag": tag, "processed": count},
                     db=monitor.db,
                 )
+            else:
+                # Log empty results at debug level for visibility without
+                # flooding the activity feed.
+                logger.debug("discovery #%s: 0 stories (likely rate-limited)", tag)
         except errors.FloodWaitError as e:
             logger.warning("discovery #%s flood wait %ss", tag, e.seconds)
             activity.log(
@@ -96,9 +204,19 @@ async def search_hashtags(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            # Wait out the flood before trying the next hashtag so the rest of
-            # the list still gets searched this cycle.
+            # Wait once and carry on with the next tag; only a second flood in
+            # the same cycle stops the list — one transient wait must not
+            # abort the whole account's work.
+            _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
             await asyncio.sleep(min(e.seconds, 30))
+            if _flood_hits[monitor.account.id] >= 2:
+                logger.info("discovery #%s: repeated flood — stopping hashtag search", tag)
+                break
+        except errors.UnauthorizedError:
+            # Session was revoked server-side (account logged out). Re-raise so
+            # the scheduler marks the account AUTH_REQUIRED instead of treating
+            # every search as a transient failure.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery #%s failed: %s", tag, exc)
             activity.log(
@@ -122,10 +240,25 @@ async def search_locations(
       - ``lat,long`` coordinates (best effort; Telegram may reject these).
     """
     processed = 0
+    acc_id = monitor.account.id
+    cache = _empty_result_cache.setdefault(acc_id, {})
+    cycle = _empty_cycle_counter.get(acc_id, 0)
     for loc in locations:
         loc = loc.strip()
         if not loc:
             continue
+        # Skip locations that returned 0 in the last cycle (same dedup as hashtags).
+        last_count = cache.get(loc)
+        if last_count == 0 and cycle - cache.get(f"_{loc}_cycle", 0) < EMPTY_CACHE_TTL:
+            continue
+        # SearchPosts is heavily rate-limited: once the per-cycle budget runs
+        # out, stop issuing further queries (rotation re-covers them later).
+        if _search_slots_left(monitor) <= 0:
+            break
+        # VPN/client went away mid-cycle: stop rather than spam failing RPCs.
+        if not _connected(monitor):
+            logger.info("discovery: client disconnected — aborting location search")
+            break
         # Cities are resolved specially: try a collected venue with a matching
         # title first, otherwise fall back to a hashtag search with the city
         # name (Telegram rejects arbitrary geo points, see module docstring).
@@ -139,22 +272,26 @@ async def search_locations(
                 f"Discovery geo '{loc}': could not resolve geo-tag",
                 event_type="discovery_error",
                 level="WARNING",
-                account_id=monitor.account.id,
+                account_id=acc_id,
                 db=monitor.db,
             )
             continue
         try:
             count = await _search_posts(monitor, area=area, limit=limit)
             processed += count
-            # Only log real finds (see search_hashtags note).
+            # Track empty results for dedup.
+            cache[loc] = count
+            cache[f"_{loc}_cycle"] = cycle
             if count:
                 activity.log(
                     f"Discovery geo {loc}: {count} stories processed",
                     event_type="discovery_geo",
-                    account_id=monitor.account.id,
+                    account_id=acc_id,
                     metadata={"location": loc, "processed": count},
                     db=monitor.db,
                 )
+            else:
+                logger.debug("discovery geo '%s': 0 stories (likely rate-limited)", loc)
         except errors.FloodWaitError as e:
             logger.warning("discovery geo '%s' flood wait %ss", loc, e.seconds)
             activity.log(
@@ -164,9 +301,18 @@ async def search_locations(
                 account_id=monitor.account.id,
                 db=monitor.db,
             )
-            # Wait out the flood before trying the next location so the rest of
-            # the list still gets searched this cycle.
+            # Wait once and carry on with the next venue; only a second flood
+            # in the same cycle stops the list.
+            _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
             await asyncio.sleep(min(e.seconds, 30))
+            if _flood_hits[monitor.account.id] >= 2:
+                logger.info("discovery geo '%s': repeated flood — stopping location search", loc)
+                break
+        except errors.UnauthorizedError:
+            # Session was revoked server-side (account logged out). Re-raise so
+            # the scheduler marks the account AUTH_REQUIRED instead of treating
+            # every search as a transient failure.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("discovery geo '%s' failed: %s", loc, exc)
             activity.log(
@@ -213,7 +359,10 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
                 return count
             except errors.FloodWaitError as e:
                 logger.warning("discovery geo '%s' flood wait %ss", city, e.seconds)
+                _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
                 return 0
+            except errors.UnauthorizedError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("discovery geo '%s' via place failed: %s", city, exc)
 
@@ -233,7 +382,10 @@ async def _search_city(monitor: StoryMonitor, city: str, limit: int) -> int:
         return count
     except errors.FloodWaitError as e:
         logger.warning("discovery city '%s' flood wait %ss", city, e.seconds)
+        _flood_hits[monitor.account.id] = _flood_hits.get(monitor.account.id, 0) + 1
         return 0
+    except errors.UnauthorizedError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("discovery city '%s' hashtag search failed: %s", city, exc)
         activity.log(
@@ -310,6 +462,11 @@ async def _search_posts(
     processed = 0
     pages = 0
     while True:
+        if not _connected(monitor):
+            logger.info("discovery: client disconnected — aborting pagination of current search")
+            break
+        if not await _acquire_search_slot(monitor):
+            break
         pages += 1
         # Bound pagination by pages: expired stories never count toward
         # ``processed``, so a processed-based cap would walk huge hashtags

@@ -36,6 +36,10 @@ SCAN_ATTEMPTS = int(os.environ.get("VPN_SCAN_ATTEMPTS", "1"))
 # server keeps serving (degraded) instead of dropping the SOCKS port for
 # minutes while the whole list is re-probed each probe window.
 FAILOVER_COOLDOWN = int(os.environ.get("VPN_FAILOVER_COOLDOWN", "120"))
+# Optional server name filter (case-insensitive substring of the server label
+# from the subscription, e.g. "netherlands"). Servers whose label contains
+# "test" are always excluded. If set, the VPN only ever uses matching servers.
+SERVER_FILTER = os.environ.get("VPN_SERVER_FILTER", "").strip().lower()
 
 xray_proc: subprocess.Popen | None = None
 
@@ -208,6 +212,38 @@ def parse_link(link: str) -> dict[str, Any] | None:
     elif link.startswith("trojan://"):
         return parse_trojan(link)
     return None
+
+
+def server_label(server: dict[str, Any] | None) -> str:
+    """Human-readable label for a parsed server (for logs)."""
+    if not server:
+        return "?"
+    name = server.get("name", "") or ""
+    name = urllib.parse.unquote(name).strip()
+    return f"{name} ({server['address']})".strip()
+
+
+def filter_links(links: list[str]) -> list[str]:
+    """Keep only links matching the optional VPN_SERVER_FILTER.
+
+    ``test`` servers are always excluded so they can never be picked as a
+    primary exit (they are probes/mirrors, not stable egress nodes).
+    """
+    if not SERVER_FILTER:
+        return [lnk for lnk in links if "test" not in lnk.lower()]
+
+    kept = []
+    for lnk in links:
+        server = parse_link(lnk)
+        if server is None:
+            continue
+        label = (server.get("name") or "").lower()
+        if "test" in label or "test" in lnk.lower():
+            continue
+        if SERVER_FILTER not in label:
+            continue
+        kept.append(lnk)
+    return kept
 
 
 def build_xray_outbound(server: dict) -> dict:
@@ -522,6 +558,35 @@ def scan_candidates(links: list[str], start: int = 0) -> list[tuple[float, int, 
     return candidates
 
 
+def find_next_candidate(
+    links: list[str],
+    start: int,
+    count: int,
+) -> tuple[int, dict] | None:
+    """Return the first working server after ``start`` in list order.
+
+    Unlike ``scan_candidates`` (which re-ranks everything by RTT and can thus
+    bounce the exit IP between countries/cities on every failover), this walks
+    the filtered list sequentially and returns the first healthy server. The
+    exit IP only changes when a failover actually happens, and it stays within
+    the configured VPN_SERVER_FILTER set.
+    """
+    n = len(links)
+    for offset in range(1, min(count, n) + 1):
+        i = (start + offset) % n
+        link = links[i]
+        server = parse_link(link)
+        if not server:
+            continue
+        log.info("Testing next candidate %d/%d: %s", offset, count, server_label(server))
+        ok, rtt = probe_server(server, SCAN_PORT)
+        if ok:
+            log.info("  %s works, RTT=%.2fs", server["address"], rtt)
+            return i, server
+        log.info("  %s failed, skipping", server["address"])
+    return None
+
+
 def launch_on_socks(server: dict) -> tuple[dict | None, subprocess.Popen | None]:
     """Start Xray for ``server`` on the live SOCKS port and verify the tunnel.
 
@@ -580,6 +645,19 @@ def main():
         log.error("No proxy links found in subscription")
         sys.exit(1)
 
+    links = filter_links(links)
+    if not links:
+        log.error(
+            "VPN_SERVER_FILTER=%r matched no servers in subscription. Available servers:",
+            SERVER_FILTER,
+        )
+        for lnk in fetch_subscription(SUB_URL):
+            server = parse_link(lnk)
+            if server:
+                log.error("  - %s", server_label(server))
+        sys.exit(1)
+    log.info("Subscription filtered to %d server(s)", len(links))
+
     config, xray_proc, current_index = try_links(links)
     if config is None:
         log.error("All servers failed")
@@ -605,7 +683,11 @@ def main():
             log.warning("No working server, retrying in %ds", backoff)
             time.sleep(backoff)
             backoff = min(backoff * 2, 300)
-            links = fetch_subscription(SUB_URL) or links
+            fresh = filter_links(fetch_subscription(SUB_URL))
+            if not fresh:
+                log.warning("Refetch produced no matching servers; retrying with previous list")
+                fresh = links
+            links = fresh
             config, xray_proc, current_index = try_links(links)
             if config:
                 fail_count = 0
@@ -635,53 +717,53 @@ def main():
                         log.warning("Failover scan on cooldown — keeping current server")
                     else:
                         log.warning("Failing over (current server stays live while scanning)")
-                        candidates = scan_candidates(links, start=current_index + 1)
+                        hit = find_next_candidate(links, current_index, count=len(links) - 1)
                         last_failover_scan = now
-                        if not candidates:
+                        if hit is None:
                             log.warning("No working candidates found — keeping current server")
                         else:
+                            _, server = hit
                             # Stop the old proxy only once a replacement has been
                             # verified on the scan port, so the outage window is
                             # just the swap itself (seconds), not the whole scan.
                             stop_xray(xray_proc)
                             xray_proc = None
-                            new_cfg = None
-                            for rtt, i, server in candidates:
-                                cfg2, proc2 = launch_on_socks(server)
-                                if proc2 is not None:
-                                    config, xray_proc, current_index = cfg2, proc2, i
-                                    new_cfg = cfg2
-                                    log.info("Failover complete: %s (RTT=%.2fs)", server["address"], rtt)
-                                    break
+                            cfg2, proc2 = launch_on_socks(server)
+                            if proc2 is not None:
+                                config, xray_proc, current_index = cfg2, proc2, hit[0]
+                                log.info("Failover complete: %s", server_label(server))
+                            else:
                                 log.warning("Tunnel not working through %s, trying next", server["address"])
-                            if new_cfg is None:
                                 config = None  # next iteration's backoff block retries the list
 
         if now - last_refresh >= REFRESH_INTERVAL:
             log.info("Refreshing subscription...")
             last_refresh = now
-            new_links = fetch_subscription(SUB_URL)
-            if new_links:
-                links = new_links
-                candidates = scan_candidates(links, start=current_index + 1)
-                if not candidates:
-                    log.warning("Refresh found no working servers — keeping current config")
-                else:
-                    stop_xray(xray_proc)
-                    xray_proc = None
-                    new_cfg = None
-                    for rtt, i, server in candidates:
-                        cfg2, proc2 = launch_on_socks(server)
-                        if proc2 is not None:
-                            config, xray_proc, current_index = cfg2, proc2, i
-                            new_cfg = cfg2
-                            log.info("Refresh complete: now on %s (RTT=%.2fs)", server["address"], rtt)
-                            break
-                        log.warning("Tunnel not working through %s, trying next", server["address"])
-                    if new_cfg is None:
-                        config = None
+            fresh = filter_links(fetch_subscription(SUB_URL))
+            if not fresh:
+                log.warning("Refresh produced no matching servers — keeping current config")
+                continue
+            links = fresh
+            # Never switch away from a healthy tunnel just because the list
+            # changed — only fail over on a real connection loss.
+            if test_proxy():
+                log.info("Refresh: current tunnel healthy — keeping %s", server_label(parse_link(links[current_index % len(links)])))
+                continue
+            log.warning("Refresh: current tunnel unhealthy — failing over")
+            hit = find_next_candidate(links, current_index, count=len(links) - 1)
+            if hit is None:
+                log.warning("Refresh found no working servers — keeping current config")
             else:
-                log.warning("Subscription refresh returned no links — keeping current config")
+                _, server = hit
+                stop_xray(xray_proc)
+                xray_proc = None
+                cfg2, proc2 = launch_on_socks(server)
+                if proc2 is not None:
+                    config, xray_proc, current_index = cfg2, proc2, hit[0]
+                    log.info("Refresh complete: now on %s", server_label(server))
+                else:
+                    log.warning("Tunnel not working through %s, trying next", server["address"])
+                    config = None
 
         time.sleep(2)
 

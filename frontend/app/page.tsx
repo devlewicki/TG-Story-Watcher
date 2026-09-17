@@ -46,7 +46,7 @@ export default function DashboardPage() {
     count: h.count,
   }));
   const dayData = data.charts.views_by_day.map((d) => ({
-    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short" }),
+    label: new Date(d.day).toLocaleDateString(locale, { day: "numeric", month: "short", timeZone: "Europe/Moscow" }),
     count: d.count,
   }));
 
@@ -68,8 +68,6 @@ export default function DashboardPage() {
         <StatCard label={t("dashboard.monitoring")} value={cards.monitoring > 0 ? t("dashboard.on") : t("dashboard.off")} accent={cards.monitoring > 0} icon={<PulseIcon />} />
         <StatCard label={t("dashboard.viewedToday")} value={cards.viewed_today} accent icon={<EyeIcon />} />
         <StatCard label={t("dashboard.inQueue")} value={cards.in_queue} icon={<ListIcon />} accentKey="sky" />
-        <StatCard label={t("dashboard.skipped24h")} value={cards.skipped} icon={<FilterIcon />} accentKey="amber" />
-        <StatCard label={t("dashboard.errors24h")} value={cards.errors} accent={cards.errors > 0} icon={<AlertIcon />} accentKey={cards.errors > 0 ? "red" : "default"} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -180,22 +178,6 @@ function ListIcon() {
     <svg viewBox="0 0 24 24" {...iconProps}>
       <path d="M8 6h13M8 12h13M8 18h13" />
       <path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" strokeWidth="2.6" />
-    </svg>
-  );
-}
-function FilterIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <path d="M4 5h16l-6 7v6l-4 2v-8L4 5z" />
-    </svg>
-  );
-}
-function AlertIcon() {
-  return (
-    <svg viewBox="0 0 24 24" {...iconProps}>
-      <path d="M12 3 2 20h20L12 3z" />
-      <path d="M12 10v4" />
-      <path d="M12 17.5h.01" strokeWidth="2.6" />
     </svg>
   );
 }

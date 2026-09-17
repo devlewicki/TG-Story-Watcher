@@ -14,14 +14,16 @@ import os
 import time
 from datetime import datetime, timezone
 
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError
 
 CONNECT_TIMEOUT = 30  # seconds to wait for Telegram connect
 
 # Hard ceiling for one account's discovery work. Covers connect, contact sync,
 # identity refresh and every search in this cycle; anything longer is a hang
 # (half-open TCP through a dropped tunnel) and gets aborted.
-DISCOVERY_ACCOUNT_TIMEOUT = 300
+# Increased from 300 to 600 — with 30+ hashtags at 3.5s each, accounts
+# need ~150s for hashtags alone plus geo/connect overhead.
+DISCOVERY_ACCOUNT_TIMEOUT = 600
 
 from ..db import SessionLocal
 from ..models import AccountStatus, TelegramAccount
@@ -62,7 +64,7 @@ async def sync_account(account: TelegramAccount) -> int:
             lookup = monitor._load_sets()
             await load_contacts_into(client, acc, lookup)
             monitor._lookup = lookup
-            count = await monitor.fetch_available(resync=True)
+            count = await monitor.fetch_available()
             acc.status = AccountStatus.ACTIVE.value
             acc.last_seen_at = datetime.now(timezone.utc)
             db.commit()
@@ -84,29 +86,22 @@ async def sync_account(account: TelegramAccount) -> int:
                 db.rollback()
                 db.close()
                 try:
-                    await cm.drop_client(account.id)
+                    await cm.mark_account_auth_required(account.id, drop_session=True)
                 except Exception:
                     pass
-                db2 = SessionLocal()
+                return 0
+            # Auth key unregistered: Telegram revoked the session (logout /
+            # forced termination) — the account needs a fresh login, but the
+            # session file is kept so the re-login flow can reuse it.
+            is_auth_unreg = isinstance(exc, (AuthKeyUnregisteredError, UnauthorizedError)) or "key is not registered" in str(exc).lower()
+            if is_auth_unreg:
+                logger.error("sync_account(%s) session unregistered — marking AUTH_REQUIRED", account.id)
+                db.rollback()
+                db.close()
                 try:
-                    acc2 = db2.get(TelegramAccount, account.id)
-                    if acc2 is not None:
-                        acc2.status = AccountStatus.AUTH_REQUIRED.value
-                        acc2.monitoring = False
-                        # Remove the dead session file so the user is
-                        # prompted to re-login instead of hitting the
-                        # same error on every sync cycle.
-                        if acc2.session_path and os.path.isfile(acc2.session_path):
-                            try:
-                                os.remove(acc2.session_path)
-                            except OSError:
-                                pass
-                        acc2.session_path = None
-                    db2.commit()
+                    await cm.mark_account_auth_required(account.id, drop_session=False)
                 except Exception:
-                    db2.rollback()
-                finally:
-                    db2.close()
+                    pass
                 return 0
             # Connection errors: force a full reconnect before retrying.
             is_conn = isinstance(exc, (ConnectionError, TimeoutError)) or "disconnected" in str(exc).lower()
@@ -161,26 +156,17 @@ async def run_analytics_once() -> None:
             logger.warning("analytics sync account=%s AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
             local.close()
             try:
-                await cm.drop_client(account.id)
+                await cm.mark_account_auth_required(account.id, drop_session=True)
             except Exception:
                 pass
-            db2 = SessionLocal()
+            continue
+        except (AuthKeyUnregisteredError, UnauthorizedError) as exc:
+            logger.warning("analytics sync account=%s session unregistered — marking AUTH_REQUIRED", account.id)
+            local.close()
             try:
-                acc2 = db2.get(TelegramAccount, account.id)
-                if acc2 is not None:
-                    acc2.status = AccountStatus.AUTH_REQUIRED.value
-                    acc2.monitoring = False
-                    if acc2.session_path and os.path.isfile(acc2.session_path):
-                        try:
-                            os.remove(acc2.session_path)
-                        except OSError:
-                            pass
-                    acc2.session_path = None
-                db2.commit()
+                await cm.mark_account_auth_required(account.id, drop_session=False)
             except Exception:
-                db2.rollback()
-            finally:
-                db2.close()
+                pass
             continue
         except Exception as exc:  # noqa: BLE001
             logger.warning("analytics sync account=%s failed: %s", account.id, exc)
@@ -234,6 +220,30 @@ _location_offset: dict[int, int] = {}
 
 # Round-robin pointer for geo-search venues: search a subset each cycle.
 _geo_venue_offset: dict[int, int] = {}
+
+# Cache of venues within a saved geo radius. The bbox+haversine scan is run
+# for every geo-enabled user on every discovery cycle; the result only changes
+# when the config or the collected places change, so memoise it briefly.
+_geo_radius_cache: dict[int, tuple[tuple[float, float, float], float, list[str]]] = {}
+GEO_RADIUS_CACHE_TTL = 600.0
+
+
+def _dedupe_locations(locations: list[str]) -> list[str]:
+    """Drop venues that appear more than once across manual/auto/geo lists.
+
+    Keeps the first occurrence (order preserved) and keys by venue id, so a
+    ``venue:4c45...`` coming from all three sources is searched exactly once.
+    Non-venue entries (``city:...``, bare titles, raw coords) are kept as-is.
+    """
+    seen_vids: set[str] = set()
+    deduped: list[str] = []
+    for loc in locations:
+        key = loc[len("venue:"):] if loc.startswith("venue:") else loc
+        if key in seen_vids:
+            continue
+        seen_vids.add(key)
+        deduped.append(loc)
+    return deduped
 
 
 def _compute_adaptive_search_params(db, user_id: int) -> dict:
@@ -392,30 +402,24 @@ async def run_discovery_once() -> None:
     finally:
         read_db.close()
 
-    # Round-robin: pick one account per user per iteration so that a single
-    # large user (500+ hashtags) does not block smaller users.
-    # Build per-user buckets.
-    user_buckets: dict[int, list[tuple[TelegramAccount, dict]]] = {}
-    for acc, cfg in pending:
-        user_buckets.setdefault(acc.user_id or 0, []).append((acc, cfg))
-    while user_buckets:
-        exhausted = []
-        for uid_bucket, items in user_buckets.items():
-            if not items:
-                exhausted.append(uid_bucket)
-                continue
-            acc, cfg = items.pop(0)
-            try:
-                await asyncio.wait_for(
-                    _discover_account(acc, cfg), timeout=DISCOVERY_ACCOUNT_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "discover_account(%s) timed out after %ss — aborting this account's cycle",
-                    acc.id, DISCOVERY_ACCOUNT_TIMEOUT,
-                )
-        for uid_bucket in exhausted:
-            del user_buckets[uid_bucket]
+    # Run discovery for all pending accounts in parallel (one asyncio task
+    # per account) so that a slow account does not block others.  Each task
+    # is individually bounded by DISCOVERY_ACCOUNT_TIMEOUT.
+    async def _run_one(acc: TelegramAccount, cfg: dict) -> None:
+        try:
+            await asyncio.wait_for(
+                _discover_account(acc, cfg), timeout=DISCOVERY_ACCOUNT_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "discover_account(%s) timed out after %ss — aborting this account's cycle",
+                acc.id, DISCOVERY_ACCOUNT_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("discover_account(%s) failed: %s", acc.id, exc)
+
+    if pending:
+        await asyncio.gather(*[_run_one(acc, cfg) for acc, cfg in pending])
 
 
 async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
@@ -426,16 +430,16 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             return
         try:
             client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
-        except AuthKeyDuplicatedError:
-            logger.error("discover_account(%s) AuthKeyDuplicatedError on connect", account.id)
-            # Fall through to outer except AuthKeyDuplicatedError handler.
+        except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError):
+            logger.error("discover_account(%s) auth failure on connect", account.id)
+            # Fall through to outer auth handlers.
             raise
         except (ConnectionError, OSError, TimeoutError) as exc:
             logger.warning("discover_account(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
             try:
                 client = await asyncio.wait_for(cm.reconnect(acc), timeout=CONNECT_TIMEOUT)
-            except AuthKeyDuplicatedError:
-                logger.error("discover_account(%s) AuthKeyDuplicatedError on reconnect", account.id)
+            except (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError):
+                logger.error("discover_account(%s) auth failure on reconnect", account.id)
                 raise
             except Exception as reconnect_exc:
                 logger.error("discover_account(%s) reconnect also failed: %s", account.id, reconnect_exc)
@@ -451,9 +455,11 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         limit = int(cfg.get("search_results_max", 50))
         all_hashtags = cfg.get("hashtags") or [] if cfg.get("hashtags_enabled", True) else []
         all_locations = list(cfg.get("locations") or [])
-        # Rotate through hashtags: search at most `hashtag_budget` per cycle
-        # to avoid flooding Telegram with too many SearchPosts requests.
-        hashtag_budget = max(5, min(30, len(all_hashtags) // 10 + 5))
+        # Rotate through hashtags: search at most `hashtag_budget` per cycle.
+        # With SEARCH_POSTS_MIN_INTERVAL=3.5s, each hashtag costs ~3.5s.
+        # Aim to search ~30 hashtags per cycle (≈105s) so all hashtags are
+        # covered in 2-3 cycles even with 100+ tags.
+        hashtag_budget = max(10, min(100, len(all_hashtags) // 3 + 10))
         uid = account.user_id or 0
         if all_hashtags:
             h_offset = _hashtag_offset.get(uid, 0) % len(all_hashtags)
@@ -463,7 +469,7 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             hashtags = []
         # Same for locations: rotate through them with a budget to prevent
         # one user with thousands of venues from starving others.
-        location_budget = max(5, min(30, len(all_locations) // 10 + 5))
+        location_budget = max(10, min(50, len(all_locations) // 5 + 10))
         auto_locations: list[str] = []
         # When auto-add is enabled, rotate through ALL collected geo places,
         # searching at most ``searches_per_hour`` of them per cycle.
@@ -471,18 +477,30 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             from ..models import GeoPlace
 
             auto_budget = max(1, int(cfg.get("searches_per_hour", 10)))
-            places = db.query(GeoPlace).order_by(GeoPlace.id).all()
+            # Fetch only the venue identifiers (the table grows unboundedly;
+            # pulling full ORM rows just to build a venue list is wasteful).
             existing_vids = {
                 l[len("venue:"):] for l in all_locations if l.startswith("venue:")
             }
-            auto = [
-                f"venue:{p.venue_id}"
-                for p in places
-                if p.venue_id and p.venue_id not in existing_vids
-            ]
+            if existing_vids:
+                place_vids = (
+                    db.query(GeoPlace.venue_id)
+                    .filter(~GeoPlace.venue_id.in_(existing_vids), GeoPlace.venue_id.isnot(None))
+                    .order_by(GeoPlace.id)
+                    .all()
+                )
+                auto = [r[0] for r in place_vids]
+            else:
+                place_vids = (
+                    db.query(GeoPlace.venue_id)
+                    .filter(GeoPlace.venue_id.isnot(None))
+                    .order_by(GeoPlace.id)
+                    .all()
+                )
+                auto = [r[0] for r in place_vids]
             if auto:
                 start = _auto_venue_offset.get(uid, 0) % len(auto)
-                auto_locations = (auto[start:] + auto[:start])[:auto_budget]
+                auto_locations = [f"venue:{vid}" for vid in (auto[start:] + auto[:start])[:auto_budget]]
                 _auto_venue_offset[uid] = (start + auto_budget) % len(auto)
         # Rotate through manually-configured locations.
         if all_locations:
@@ -511,33 +529,40 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             c_lat = float(geo_lat)
             c_lng = float(geo_lng)
             c_radius = geo_radius
-            # Bounding box (fast pre-filter)
-            lat_margin = c_radius / 111.0 + 0.5
-            lng_margin = c_radius / (111.0 * math.cos(math.radians(c_lat))) + 0.5
-            candidates = (
-                db.query(GeoPlace)
-                .filter(
-                    GeoPlace.lat.isnot(None),
-                    GeoPlace.long.isnot(None),
-                    GeoPlace.lat >= c_lat - lat_margin,
-                    GeoPlace.lat <= c_lat + lat_margin,
-                    GeoPlace.long >= c_lng - lng_margin,
-                    GeoPlace.long <= c_lng + lng_margin,
+            geo_key = (c_lat, c_lng, c_radius)
+            cached = _geo_radius_cache.get(uid)
+            if cached and cached[0] == geo_key and (time.monotonic() - cached[1]) < GEO_RADIUS_CACHE_TTL:
+                geo_venues = cached[2]
+            else:
+                # Bounding box (fast pre-filter)
+                lat_margin = c_radius / 111.0 + 0.5
+                lng_margin = c_radius / (111.0 * math.cos(math.radians(c_lat))) + 0.5
+                candidates = (
+                    db.query(GeoPlace)
+                    .filter(
+                        GeoPlace.lat.isnot(None),
+                        GeoPlace.long.isnot(None),
+                        GeoPlace.lat >= c_lat - lat_margin,
+                        GeoPlace.lat <= c_lat + lat_margin,
+                        GeoPlace.long >= c_lng - lng_margin,
+                        GeoPlace.long <= c_lng + lng_margin,
+                    )
+                    .all()
                 )
-                .all()
-            )
-            for p in candidates:
-                dlat = math.radians(p.lat - c_lat)
-                dlng = math.radians(p.long - c_lng)
-                a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(c_lat)) * math.cos(math.radians(p.lat)) * math.sin(dlng / 2) ** 2
-                dist = _R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-                if dist <= c_radius and p.venue_id:
-                    geo_venues.append(f"venue:{p.venue_id}")
+                geo_venues = []
+                for p in candidates:
+                    dlat = math.radians(p.lat - c_lat)
+                    dlng = math.radians(p.long - c_lng)
+                    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(c_lat)) * math.cos(math.radians(p.lat)) * math.sin(dlng / 2) ** 2
+                    dist = _R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                    if dist <= c_radius and p.venue_id:
+                        geo_venues.append(f"venue:{p.venue_id}")
+                _geo_radius_cache[uid] = (geo_key, time.monotonic(), geo_venues)
             logger.info("geo-search: found %d venues within %.1fkm of (%.4f, %.4f)", len(geo_venues), c_radius, c_lat, c_lng)
 
         # Apply budget to geo venues: rotate through them in batches
         # to avoid flooding Telegram with hundreds of requests per cycle.
-        geo_budget = max(5, min(30, len(geo_venues) // 10 + 5)) if geo_venues else 0
+        geo_budget = max(10, min(50, len(geo_venues) // 5 + 10)) if geo_venues else 0
         if geo_venues and geo_budget > 0:
             full_geo_count = len(geo_venues)
             g_offset = _geo_venue_offset.get(uid, 0) % full_geo_count
@@ -545,37 +570,55 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             _geo_venue_offset[uid] = (g_offset + geo_budget) % full_geo_count
             logger.info("geo-search: using %d/%d venues (budget=%d)", len(geo_venues), geo_budget, geo_budget)
 
-        locations = manual_locations + auto_locations + geo_venues
-        # Geolocation first: it is the primary discovery mode and may be slow,
-        # so big hashtag lists must not starve it.
-        if locations:
-            await discovery.search_locations(monitor, locations, limit)
+        # Independent filter logic (per TZ §5):
+        # - Hashtags ON, Radius OFF  → only hashtags
+        # - Hashtags ON, Radius ON   → hashtags + geo-radius venues
+        # - Hashtags OFF, Radius OFF → places & cities (manual + auto)
+        # - Hashtags OFF, Radius ON  → geo-radius venues only
+        hashtags_on = bool(hashtags)
+        geo_on = bool(geo_venues)
+        if hashtags_on:
+            # When hashtags are active, only add geo-radius venues (not
+            # manual/auto locations) so the three categories stay independent.
+            locations = geo_venues
+        elif geo_on:
+            # Hashtags OFF, Radius ON → only geo-radius venues.
+            locations = geo_venues
+        else:
+            # Both OFF → default to places & cities.
+            locations = manual_locations + auto_locations
+        # Deduplicate across the sources.
+        locations = _dedupe_locations(locations)
+        # Give this account a fresh SearchPosts pacing budget for the cycle.
+        discovery._reset_pacing(monitor)
+        # Hashtags first: they reliably return results (venue searches are
+        # noisy/empty in practice), so give them the budget before locations
+        # consume it all.
+        hashtag_processed = 0
         if hashtags:
-            await discovery.search_hashtags(monitor, hashtags, limit)
+            hashtag_processed = await discovery.search_hashtags(monitor, hashtags, limit)
+        location_processed = 0
+        if locations:
+            location_processed = await discovery.search_locations(monitor, locations, limit)
+        logger.info(
+            "discovery: account %s cycle done — hashtags %d/%d (processed=%d), locations %d (processed=%d)",
+            account.id, len(hashtags), hashtag_budget, hashtag_processed,
+            len(locations), location_processed,
+        )
     except AuthKeyDuplicatedError as exc:
         logger.error("discover_account(%s) AuthKeyDuplicatedError — session invalidated by IP change, marking AUTH_REQUIRED", account.id)
         db.close()
         try:
-            await cm.drop_client(account.id)
+            await cm.mark_account_auth_required(account.id, drop_session=True)
         except Exception:
             pass
-        db2 = SessionLocal()
+    except (AuthKeyUnregisteredError, UnauthorizedError) as exc:
+        logger.error("discover_account(%s) session unregistered — marking AUTH_REQUIRED", account.id)
+        db.close()
         try:
-            acc2 = db2.get(TelegramAccount, account.id)
-            if acc2 is not None:
-                acc2.status = AccountStatus.AUTH_REQUIRED.value
-                acc2.monitoring = False
-                if acc2.session_path and os.path.isfile(acc2.session_path):
-                    try:
-                        os.remove(acc2.session_path)
-                    except OSError:
-                        pass
-                acc2.session_path = None
-            db2.commit()
+            await cm.mark_account_auth_required(account.id, drop_session=False)
         except Exception:
-            db2.rollback()
-        finally:
-            db2.close()
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.error("discover_account(%s) failed: %s", account.id, exc)
     finally:
@@ -590,6 +633,39 @@ async def run_forever(interval: float) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("scheduler cycle error: %s", exc)
         await asyncio.sleep(interval)
+
+
+async def reconcile_orphaned_clients() -> int:
+    """Drop cached Telegram clients whose account rows no longer exist.
+
+    Deleted users/accounts (admin panel) are never picked again by
+    ``run_once``/discovery, but the in-memory ``cm._clients`` cache keeps the
+    account authorized on Telegram until a restart or VPN IP change. This
+    releases the cached client + leftover session files so the phone number can
+    be used by a fresh login right away.
+    """
+    ids = cm.cached_account_ids()
+    if not ids:
+        return 0
+    db = SessionLocal()
+    try:
+        existing = {
+            row[0]
+            for row in db.query(TelegramAccount.id).filter(TelegramAccount.id.in_(ids)).all()
+        }
+    finally:
+        db.close()
+    dropped = 0
+    for account_id in ids:
+        if account_id not in existing:
+            try:
+                await cm.forget_account(account_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("forget_account(%s) failed: %s", account_id, exc)
+            dropped += 1
+    if dropped:
+        logger.info("reconciled %d orphaned Telegram client(s)", dropped)
+    return dropped
 
 
 def main() -> None:

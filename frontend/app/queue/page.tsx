@@ -5,6 +5,7 @@ import { api, type QueueItem } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 import { Avatar, Badge, Button, Card, Empty, ErrorBanner, Icon, IconButton, PageHeader, PageLoading } from "@/components/ui";
 import { formatTime } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 
 const PAGE = 200;
 
@@ -109,7 +110,7 @@ export default function QueuePage() {
       await api.post(path);
       load(0, false);
     } catch (e) {
-      alert((e as Error).message);
+      setError(friendlyError(e));
     }
   };
 

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import AccountStatus, TelegramAccount
+from ..settings.new_user_defaults import apply_wiring_if_new_user
 from ..telegram import client_manager as cm
 from .deps import current_user_id
 from .schemas import AccountOut, account_out
@@ -17,6 +18,22 @@ from .schemas import AccountOut, account_out
 logger = logging.getLogger("storywatcher.api.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 Db = Annotated[Session, Depends(get_db)]
+
+
+def _friendly_auth_error(exc: Exception) -> str | None:
+    """Map Telegram/Telethon errors into a user-friendly Russian message."""
+    try:
+        from telethon import errors as tl_errors
+    except ImportError:
+        return None
+    if isinstance(exc, tl_errors.FloodWaitError):
+        secs = getattr(exc, "seconds", None)
+        if secs:
+            return f"Слишком много попыток — Telegram просит подождать {int(secs)} сек."
+        return "Слишком много попыток, попробуйте позже."
+    if isinstance(exc, (tl_errors.SendCodeUnavailableError, tl_errors.PhoneNumberFloodError)):
+        return "Telegram временно ограничил отправку кодов на этот номер — попробуйте через несколько минут."
+    return None
 
 
 class SendCodeIn(BaseModel):
@@ -93,9 +110,10 @@ def _find_duplicate(db: Session, account: TelegramAccount, normalized_phone: str
 
 
 async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
-    account = _account_for_phone(db, phone, user_id)
-    original_id = account.id
+    original_id = None
     try:
+        account = _account_for_phone(db, phone, user_id)
+        original_id = account.id
         client = await cm.finish_login(phone, account)
         me = await client.get_me()
         normalized_phone = cm.normalize_phone(getattr(me, "phone", None)) if me else ""
@@ -125,6 +143,9 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
         account.last_name = getattr(me, "last_name", None) if me else None
         account.status = AccountStatus.ACTIVE.value
         db.commit()
+        # Fresh users (seeded at registration) get hashtag search enabled and
+        # monitoring auto-started right after their first Telegram authorization.
+        apply_wiring_if_new_user(db, user_id, account)
         # Remove the temp row's orphan session file only when the fresh login's
         # session was NOT adopted by the surviving row (otherwise we'd delete
         # the very session the merged account now uses).
@@ -141,7 +162,8 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
         logger.exception("Telegram session finalization failed")
         raise HTTPException(status_code=500, detail=f"session finalize failed: {exc}")
     finally:
-        await cm.release_client(original_id)
+        if original_id is not None:
+            await cm.release_client(original_id)
     return AuthStatusOut(status="authed", needs_password=False)
 
 
@@ -153,7 +175,12 @@ def _session_path_for_deleted(account_id: int) -> str:
 async def send_code(payload: SendCodeIn, user_id: Annotated[int, Depends(current_user_id)]):
     try:
         await cm.auth_send_code(payload.phone)
+    except cm.CooldownError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except Exception as exc:
+        friendly = _friendly_auth_error(exc)
+        if friendly:
+            raise HTTPException(status_code=429, detail=friendly)
         raise HTTPException(status_code=400, detail=f"failed to send code: {exc}")
     return {"status": "code_sent"}
 
@@ -163,7 +190,9 @@ async def confirm_code(payload: ConfirmCodeIn, db: Db, user_id: Annotated[int, D
     try:
         result = await cm.auth_confirm_code(payload.phone, payload.code)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"confirmation failed: {exc}")
+        friendly = _friendly_auth_error(exc)
+        detail = friendly or f"confirmation failed: {exc}"
+        raise HTTPException(status_code=429 if friendly else 400, detail=detail)
     if result.get("status") == "twofa":
         return AuthStatusOut(status="twofa", needs_password=True)
     if result.get("status") != "ok":
@@ -176,7 +205,9 @@ async def confirm_password(payload: ConfirmPasswordIn, db: Db, user_id: Annotate
     try:
         ok = await cm.auth_confirm_password(payload.phone, payload.password)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"password confirmation failed: {exc}")
+        friendly = _friendly_auth_error(exc)
+        detail = friendly or f"password confirmation failed: {exc}"
+        raise HTTPException(status_code=429 if friendly else 400, detail=detail)
     if not ok:
         raise HTTPException(status_code=400, detail="invalid 2FA password")
     return await _finalize(payload.phone, db, user_id)

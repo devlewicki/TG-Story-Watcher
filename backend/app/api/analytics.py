@@ -232,7 +232,7 @@ def overview(db:Db,user_id:Annotated[int,Depends(current_user_id)],days:int=Quer
    "reactions": total_reactions,
    "forwards": total_forwards,
    "average_er": avg_er,
-   "top_stories": sorted(a, key=lambda x: x["views"] or 0, reverse=True)[:10],
+   "top_stories": sorted(a, key=lambda x: x["views"] or 0, reverse=True),
  }
 @router.post("/sync")
 async def sync(account_id:int,db:Db,user_id:Annotated[int,Depends(current_user_id)]):

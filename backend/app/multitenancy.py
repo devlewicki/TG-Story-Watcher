@@ -12,7 +12,10 @@ def verify_password(password: str, encoded: str) -> bool:
         return scheme == "pbkdf2_sha256" and hmac.compare_digest(base64.urlsafe_b64encode(digest).decode(), digest_raw)
     except (ValueError, TypeError): return False
 def create_user_token(user_id: int) -> str:
-    payload = base64.urlsafe_b64encode(json.dumps({"user_id": user_id, "exp": int(time.time()) + 86400 * 30}, separators=(",", ":")).encode()).decode().rstrip("=")
+    now = int(time.time())
+    payload = base64.urlsafe_b64encode(json.dumps({
+        "user_id": user_id, "iat": now, "exp": now + 86400 * 30,
+    }, separators=(",", ":")).encode()).decode().rstrip("=")
     return f"user.{payload}.{hmac.new(get_settings().secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()}"
 def user_id_from_token(token: str | None) -> int | None:
     try:
@@ -22,14 +25,31 @@ def user_id_from_token(token: str | None) -> int | None:
         if not hmac.compare_digest(signature, expected): return None
         if int(data["exp"]) <= time.time(): return None
         uid = int(data["user_id"])
-        # Check per-user token revocation (written via revoke_user_tokens).
+        # Per-user token revocation + existence check (best-effort: if the DB
+        # is unavailable, the token passes through). The row-existence check
+        # rejects tokens issued to a user that was deleted by an admin, which
+        # otherwise manifests as FK-violation 500s on the next write.
         try:
             from .db import SessionLocal
             from .models import SettingsStore as _SS
+            from .models import User as _User
             _db = SessionLocal()
             try:
-                _row = _db.query(_SS.value).filter_by(key=f"user:{uid}:token_revoked_at").first()
-                if _row is not None and int(data["exp"]) <= int(_row.value):
+                _revoked = _db.query(_SS.value).filter_by(key=f"user:{uid}:token_revoked_at").first()
+                if _revoked is not None:
+                    revoked_at = int(_revoked.value)
+                    iat = data.get("iat")
+                    if iat is not None:
+                        # Tokens carry an issued-at claim: revocation kills any
+                        # token that was not issued strictly after the revocation
+                        # point (same-second issuance also counts as revoked).
+                        if int(iat) <= revoked_at:
+                            return None
+                    elif int(data["exp"]) <= revoked_at:
+                        # Legacy tokens (no iat, issued before this check was
+                        # added): keep the old expiry comparison.
+                        return None
+                if _db.get(_User, uid) is None:
                     return None
             finally:
                 _db.close()

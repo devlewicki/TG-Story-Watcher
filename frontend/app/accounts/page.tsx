@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { api, type Account, clearToken } from "@/lib/api";
 import { useFetch } from "@/lib/useFetch";
 import { useTranslation } from "@/lib/i18n";
-import { Badge, Button, Card, Empty, ErrorBanner, Icon, IconButton, PageHeader, PageLoading } from "@/components/ui";
+import { Badge, Button, Card, Empty, ErrorBanner, Icon, PageHeader, PageLoading } from "@/components/ui";
+import { TelegramAuthModal } from "@/components/TelegramAuthModal";
 import { timeAgo } from "@/lib/format";
-
-type FlowStep = "phone" | "code" | "password";
+import { friendlyError } from "@/lib/errors";
 
 export default function AccountsPage() {
   const { t } = useTranslation();
@@ -53,7 +53,7 @@ export default function AccountsPage() {
         </div>
       )}
 
-      {showModal && <AuthModal onClose={() => setShowModal(false)} onDone={() => { setShowModal(false); refresh(); window.dispatchEvent(new Event("storywatcher:account-updated")); }} />}
+      {showModal && <TelegramAuthModal onClose={() => setShowModal(false)} onDone={() => { setShowModal(false); refresh(); window.dispatchEvent(new Event("storywatcher:account-updated")); }} />}
     </div>
   );
 }
@@ -62,27 +62,30 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [showRelogin, setShowRelogin] = useState(false);
+  const [actionError, setActionError] = useState("");
   const fullName = [account.first_name, account.last_name].filter(Boolean).join(" ");
   const name = fullName || account.username || account.phone;
 
   const act = async (kind: "start" | "pause") => {
     setBusy(kind);
+    setActionError("");
     try {
       await api.post(`/accounts/${account.id}/${kind}`);
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
     setBusy(null);
   };
 
   const toggleMonitoring = async () => {
     setBusy("monitoring");
+    setActionError("");
     try {
       await api.post(`/accounts/${account.id}/monitoring`, { monitoring: !account.monitoring });
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
     setBusy(null);
   };
@@ -90,11 +93,12 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
   const remove = async () => {
     if (!confirm(t("accounts.deleteConfirm", { name }))) return;
     setBusy("delete");
+    setActionError("");
     try {
       await api.delete(`/accounts/${account.id}`);
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
     setBusy(null);
   };
@@ -154,8 +158,14 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
         </Button>
       </div>
 
+      {actionError && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+          {actionError}
+        </div>
+      )}
+
       {showRelogin && (
-        <AuthModal
+        <TelegramAuthModal
           onClose={() => setShowRelogin(false)}
           onDone={() => { setShowRelogin(false); onChanged(); }}
           initialPhone={account.phone}
@@ -166,161 +176,3 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
   );
 }
 
-function AuthModal({ onClose, onDone, initialPhone, autoSend }: { onClose: () => void; onDone: () => void; initialPhone?: string; autoSend?: boolean }) {
-  const { t } = useTranslation();
-  const [step, setStep] = useState<FlowStep>("phone");
-  const [phone, setPhone] = useState(initialPhone ?? "");
-  const [code, setCode] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const doSendCode = async (targetPhone: string) => {
-    setError("");
-    setBusy(true);
-    try {
-      await api.post("/auth/send-code", { phone: targetPhone });
-      setStep("code");
-    } catch (e) {
-      setError((e as Error).message);
-    }
-    setBusy(false);
-  };
-
-  // Auto-send code on mount when opened in re-login mode.
-  const autoSendHandled = useRef(false);
-  useEffect(() => {
-    if (initialPhone && autoSend && !autoSendHandled.current) {
-      autoSendHandled.current = true;
-      doSendCode(initialPhone);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const sendCode = async () => {
-    setError("");
-    if (phone.length < 5) return setError(t("accounts.phoneError"));
-    await doSendCode(phone);
-  };
-
-  const confirmCode = async () => {
-    setError("");
-    setBusy(true);
-    try {
-      const res = await api.post<{ status: string; needs_password?: boolean }>("/auth/confirm-code", {
-        phone,
-        code,
-      });
-      if (res.status === "twofa") {
-        setStep("password");
-      } else {
-        onDone();
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    }
-    setBusy(false);
-  };
-
-  const confirmPassword = async () => {
-    setError("");
-    setBusy(true);
-    try {
-      await api.post("/auth/confirm-password", { phone, password });
-      onDone();
-    } catch (e) {
-      setError((e as Error).message);
-    }
-    setBusy(false);
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{t("accounts.connectTitle")}</h2>
-          <IconButton label={t("common.cancel")} onClick={onClose}>
-            <Icon name="close" className="h-4 w-4" />
-          </IconButton>
-        </div>
-
-        <div className="mt-4 flex items-center gap-1 text-xs text-slate-400">
-          {(["phone", "code", "password"] as FlowStep[]).map((s, i) => (
-            <span key={s} className="flex items-center gap-1">
-              {i > 0 && <span>→</span>}
-              <span className={step === s ? "text-emerald-600" : ""}>{stepLabel(s, t)}</span>
-            </span>
-          ))}
-        </div>
-
-        {step === "phone" && (
-          <div className="mt-4">
-            <label className="text-sm text-slate-600 dark:text-slate-300">{t("accounts.phoneLabel")}</label>
-            <input
-              type="text"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder={t("accounts.phonePlaceholder")}
-              className="mt-1 w-full sw-input"
-              autoFocus
-            />
-          </div>
-        )}
-
-        {step === "phone" && busy && (
-          <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">{t("accounts.sendingCode")}</p>
-        )}
-
-        {step === "code" && (
-          <div className="mt-4">
-            <label className="text-sm text-slate-600 dark:text-slate-300">
-              {t("accounts.codeLabel")}
-            </label>
-            <input
-              type="text"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              placeholder={t("accounts.codePlaceholder")}
-              className="mt-1 w-full sw-input"
-              autoFocus
-            />
-          </div>
-        )}
-
-        {step === "password" && (
-          <div className="mt-4">
-            <label className="text-sm text-slate-600 dark:text-slate-300">
-              {t("accounts.passwordLabel")}
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={t("accounts.passwordPlaceholder")}
-              className="mt-1 w-full sw-input"
-              autoFocus
-            />
-          </div>
-        )}
-
-        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
-          {step === "phone" && (
-            <Button onClick={sendCode} disabled={busy}>{busy ? "…" : t("common.sendCode")}</Button>
-          )}
-          {step === "code" && (
-            <Button onClick={confirmCode} disabled={busy}>{busy ? "…" : t("common.confirm")}</Button>
-          )}
-          {step === "password" && (
-            <Button onClick={confirmPassword} disabled={busy}>{busy ? "…" : t("common.login")}</Button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function stepLabel(s: FlowStep, t: (key: string) => string): string {
-  return s === "phone" ? t("common.phone") : s === "code" ? t("common.code") : t("common.twofa");
-}

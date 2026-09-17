@@ -44,15 +44,23 @@ class TestDashboard:
         assert cards["errors"] == 2
 
     def test_charts_views_by_hour(self, client, auth_headers, seed_accounts, seed_stories, seed_views):
-        """views_by_hour should have 24 entries with non-negative counts."""
+        """views_by_hour should have entries up to the current Moscow hour."""
         resp = client.get("/api/dashboard", headers=auth_headers)
         data = resp.json()
         hours = data["charts"]["views_by_hour"]
-        assert len(hours) == 24
+        # Now returns 0..current_moscow_hour instead of 0..23
+        assert 1 <= len(hours) <= 24
         for h in hours:
             assert "hour" in h
             assert "count" in h
             assert h["count"] >= 0
+        # Hours should be sequential starting from 0
+        assert hours[0]["hour"] == 0
+        # Last hour should be <= current hour
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        current_hour = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Moscow")).hour
+        assert hours[-1]["hour"] <= current_hour
 
     def test_charts_views_by_day(self, client, auth_headers, seed_accounts, seed_stories, seed_views):
         """views_by_day should have 14 entries (today + 13 previous days)."""
@@ -122,7 +130,8 @@ class TestStats:
         """Stats charts should use aggregated queries (single query each)."""
         resp = client.get("/api/stats?days=7", headers=auth_headers)
         data = resp.json()
-        assert len(data["views_by_hour"]) == 24
+        # Now returns 0..current_moscow_hour instead of 0..23
+        assert 1 <= len(data["views_by_hour"]) <= 24
         assert len(data["views_by_day"]) >= 1
 
     def test_stats_period_days(self, client, auth_headers, seed_accounts):

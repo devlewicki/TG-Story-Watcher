@@ -6,7 +6,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+from zoneinfo import ZoneInfo
 
+from ..config import get_settings
 from ..db import get_db
 from ..models import ActivityLog, Story, StoryQueue, StoryView, TelegramAccount
 from .deps import require_api_token, current_user_id
@@ -18,6 +20,7 @@ Db = Annotated[Session, Depends(get_db)]
 
 @router.get("/dashboard")
 def dashboard(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
+    settings = get_settings()
     today = user_today(db, user_id)
     ids = [x.id for x in db.query(TelegramAccount).filter_by(user_id=user_id).all()]
     if not ids:
@@ -76,18 +79,28 @@ def dashboard(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
 
     # --- Charts: single aggregated queries instead of 38 individual counts ---
 
-    # Views by hour (today): use EXTRACT(HOUR) for a single query.
+    # Views by hour (today) — Moscow time: extract hour after timezone
+    # conversion so the chart axis matches MSK, not UTC.
+    # SQLite does not support AT TIME ZONE, so fall back to plain EXTRACT.
+    is_sqlite = settings.database_url.startswith("sqlite")
+    moscow_now = user_now(db, user_id)
+    current_moscow_hour = moscow_now.hour
+    if is_sqlite:
+        hour_expr = func.extract("hour", StoryView.viewed_at)
+    else:
+        hour_expr = func.extract("hour", func.timezone("Europe/Moscow", StoryView.viewed_at))
     hour_rows = (
         db.query(
-            func.extract("hour", StoryView.viewed_at).label("hour"),
+            hour_expr.label("hour"),
             func.count(StoryView.id).label("cnt"),
         )
         .filter(StoryView.account_id.in_(ids), StoryView.viewed_at >= today)
-        .group_by(text("hour"))
+        .group_by(text("1"))
         .all()
     )
     hour_map = {int(r.hour): r.cnt for r in hour_rows}
-    views_by_hour = [{"hour": h, "count": hour_map.get(h, 0)} for h in range(24)]
+    # Only return hours up to the current Moscow hour (no future hours).
+    views_by_hour = [{"hour": h, "count": hour_map.get(h, 0)} for h in range(current_moscow_hour + 1)]
 
     # Views by day (last 14 days): use DATE() aggregation.
     day_rows = (
@@ -140,6 +153,7 @@ def dashboard(db: Db, user_id: Annotated[int, Depends(current_user_id)]):
 
 @router.get("/stats")
 def stats(db: Db, user_id: Annotated[int, Depends(current_user_id)], days: int = 7):
+    settings = get_settings()
     today = user_today(db, user_id)
     start = user_start_day(db, user_id, days_ago=max(days - 1, 0))
     ids = [x.id for x in db.query(TelegramAccount.id).filter_by(user_id=user_id)]
@@ -191,18 +205,25 @@ def stats(db: Db, user_id: Annotated[int, Depends(current_user_id)], days: int =
         for d in range(max(days - 1, 0), -1, -1)
     ]
 
-    # Hourly views — aggregated.
+    # Hourly views — Moscow time, capped to current hour.
+    is_sqlite = settings.database_url.startswith("sqlite")
+    moscow_now = user_now(db, user_id)
+    current_moscow_hour = moscow_now.hour
+    if is_sqlite:
+        hour_expr = func.extract("hour", StoryView.viewed_at)
+    else:
+        hour_expr = func.extract("hour", func.timezone("Europe/Moscow", StoryView.viewed_at))
     hour_rows = (
         db.query(
-            func.extract("hour", StoryView.viewed_at).label("hour"),
+            hour_expr.label("hour"),
             func.count(StoryView.id).label("cnt"),
         )
         .filter(StoryView.account_id.in_(ids), StoryView.viewed_at >= today)
-        .group_by(text("hour"))
+        .group_by(text("1"))
         .all()
     )
     hour_map = {int(r.hour): r.cnt for r in hour_rows}
-    hourly = [{"hour": h, "count": hour_map.get(h, 0)} for h in range(24)]
+    hourly = [{"hour": h, "count": hour_map.get(h, 0)} for h in range(current_moscow_hour + 1)]
 
     def source(model):
         return {

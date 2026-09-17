@@ -14,11 +14,9 @@ const THEME_KEY = "storywatcher_theme";
 type Theme = "dark" | "light";
 
 function initial(): Theme {
-  if (typeof window === "undefined") return "dark";
-  const saved = window.localStorage.getItem(THEME_KEY);
-  if (saved === "light" || saved === "dark") return saved;
-  // Follow the OS preference by default.
-  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  // The app is dark-theme only. Keep persisting the value so the class stays
+  // stable across reloads and any legacy "light" value is overwritten.
+  return "dark";
 }
 
 const ThemeContext = createContext<{ theme: Theme; toggle: () => void }>({
@@ -27,16 +25,17 @@ const ThemeContext = createContext<{ theme: Theme; toggle: () => void }>({
 });
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(initial);
+  const [theme] = useState<Theme>(initial);
 
   useEffect(() => {
     const root = document.documentElement;
-    root.classList.toggle("dark", theme === "dark");
-    window.localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
+    root.classList.add("dark");
+    root.classList.remove("light");
+    window.localStorage.setItem(THEME_KEY, "dark");
+  }, []);
 
   const toggle = useCallback(() => {
-    setTheme((t) => (t === "dark" ? "light" : "dark"));
+    // No theme switching: the app is dark-only.
   }, []);
 
   return (

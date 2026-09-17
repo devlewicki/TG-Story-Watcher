@@ -5,7 +5,7 @@ _hashtag_offset, preventing key collisions.
 """
 from __future__ import annotations
 
-from app.workers.scheduler import _hashtag_offset, _location_offset, _auto_venue_offset, _geo_venue_offset
+from app.workers.scheduler import _hashtag_offset, _location_offset, _auto_venue_offset, _geo_venue_offset, _dedupe_locations
 
 
 class TestRotationOffsets:
@@ -38,3 +38,28 @@ class TestRotationOffsets:
         assert 42 not in _location_offset or _location_offset.get(42) != 20
         # Cleanup
         _hashtag_offset.pop(42, None)
+
+
+class TestDedupeLocations:
+    """Locations from manual/auto/geo lists must not double-search venues."""
+
+    def test_same_venue_from_three_sources_searched_once(self):
+        merged = [
+            "venue:abc",
+            "city:volkhov",
+            "venue:abc",      # from auto rotation
+            "venue:def",
+            "venue:abc",      # from geo radius
+        ]
+        assert _dedupe_locations(merged) == ["venue:abc", "city:volkhov", "venue:def"]
+
+    def test_non_venue_entries_preserved(self):
+        merged = ["city:volkhov", "59.1,32.3", "venue:xyz", "city:volkhov"]
+        assert _dedupe_locations(merged) == ["city:volkhov", "59.1,32.3", "venue:xyz"]
+
+    def test_empty_input(self):
+        assert _dedupe_locations([]) == []
+
+    def test_order_preserved_keeps_first(self):
+        merged = ["venue:a", "venue:b", "venue:a", "venue:c", "venue:b"]
+        assert _dedupe_locations(merged) == ["venue:a", "venue:b", "venue:c"]

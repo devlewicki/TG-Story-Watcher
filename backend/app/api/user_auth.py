@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import User
 from ..multitenancy import create_user_token, hash_password, require_user, verify_password
+from ..settings.new_user_defaults import seed_new_user
 router=APIRouter(prefix="/user-auth",tags=["user-auth"])
 Db=Annotated[Session,Depends(get_db)]
 class RegisterIn(BaseModel):
@@ -17,6 +18,7 @@ def register(payload:RegisterIn,db:Db):
  email=str(payload.email).lower()
  if db.query(User).filter_by(email=email).first():raise HTTPException(409,"Пользователь с таким email уже зарегистрирован")
  user=User(first_name=payload.first_name,last_name=payload.last_name,email=email,password_hash=hash_password(payload.password)); db.add(user); db.commit(); db.refresh(user)
+ seed_new_user(db,user.id)
  return {"token":create_user_token(user.id),"user":_out(user)}
 @router.post("/login")
 def login(payload:LoginIn,db:Db):

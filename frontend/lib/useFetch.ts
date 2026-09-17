@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { friendlyError } from "@/lib/errors";
 
 export function useFetch<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -22,7 +23,7 @@ export function useFetch<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: 
       }
     } catch (e) {
       if (!controller.signal.aborted) {
-        setError((e as Error).message);
+        setError(friendlyError(e));
         setLoading(false);
       }
     }

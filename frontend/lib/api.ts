@@ -64,8 +64,22 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    const detail =
-      (data as { detail?: string })?.detail || `Request failed (${res.status})`;
+    let detail = `Request failed (${res.status})`;
+    if (data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      // FastAPI returns { detail: "..." } or { detail: { message: "...", code: "..." } }
+      if (typeof d.detail === "string") {
+        detail = d.detail;
+      } else if (typeof d.detail === "object" && d.detail !== null) {
+        const det = d.detail as Record<string, unknown>;
+        if (typeof det.message === "string") detail = det.message;
+      }
+      // Nested error: { error: { message: "..." } }
+      if (typeof d.error === "object" && d.error !== null) {
+        const err = d.error as Record<string, unknown>;
+        if (typeof err.message === "string") detail = err.message;
+      }
+    }
     throw new ApiError(res.status, detail);
   }
   return data as T;

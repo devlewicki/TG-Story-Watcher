@@ -1,5 +1,8 @@
 import { type Lang } from "@/lib/i18n";
 
+// The whole app (user pages + admin panel) is pinned to Moscow time.
+export const APP_TIMEZONE = "Europe/Moscow";
+
 // We can't use the hook here since this is a utility file, not a component.
 // We'll read from localStorage directly for the locale.
 function getLocale(): string {
@@ -41,6 +44,7 @@ export function formatTime(iso: string | null | undefined): string {
     month: "short",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: APP_TIMEZONE,
   });
 }
 
