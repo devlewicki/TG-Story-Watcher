@@ -409,10 +409,16 @@ export default function DiscoveryPage() {
                   )}
                   {cfg.hashtags.length === 0 && <p className="text-sm text-slate-400">{t("discovery.noHashtags")}</p>}
                   {overflows && (
-                    <button onClick={() => setTagsExpanded(!tagsExpanded)}
-                      className="text-xs font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
-                      {tagsExpanded ? t("discovery.collapse") : t("discovery.showAllTags", { count: cfg.hashtags.length })}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => setTagsExpanded(!tagsExpanded)}
+                        className="text-xs font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
+                        {tagsExpanded ? t("discovery.collapse") : t("discovery.showAllTags", { count: cfg.hashtags.length })}
+                      </button>
+                      <button onClick={() => update({ hashtags: [] })}
+                        className="text-xs font-medium text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300">
+                        {t("discovery.clearAllTags")}
+                      </button>
+                    </div>
                   )}
                 </>
               );
@@ -553,56 +559,7 @@ export default function DiscoveryPage() {
               )}
             </div>
 
-            {/* Collected places */}
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800">
-              <div onClick={() => setPlacesOpen(!placesOpen)}
-                className="flex cursor-pointer w-full items-center justify-between px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/50">
-                <span className="flex items-center gap-2">
-                  {t("discovery.collectedPlaces")}
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">{places.length}</span>
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="hidden text-xs font-normal text-slate-400 sm:inline">{t("discovery.fromStories")}</span>
-                  <Icon name="chevron" className={`h-4 w-4 text-slate-400 transition-transform ${placesOpen ? "rotate-180" : ""}`} />
-                </span>
-              </div>
-              {placesOpen && (
-                <div className="space-y-2 border-t border-slate-200 p-3 dark:border-slate-800">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex gap-3 text-xs">
-                      <button onClick={selectAll} className="font-medium text-emerald-600 hover:underline dark:text-emerald-400">{t("discovery.selectAll")}</button>
-                      <button onClick={deselectAll} className="font-medium text-slate-500 hover:underline dark:text-slate-400">{t("discovery.deselectAll")}</button>
-                    </div>
-                    <input value={placeFilter} onChange={(e) => setPlaceFilter(e.target.value)}
-                      placeholder={t("discovery.searchPlace")}
-                      className="w-40 sw-input !py-1 text-xs" />
-                  </div>
-                  {places.length === 0 ? (
-                    <p className="px-2 py-3 text-center text-xs text-slate-400">{t("discovery.emptyPlaces")}</p>
-                  ) : (
-                    <div className="max-h-56 space-y-0.5 overflow-auto">
-                      {filteredPlaces.map((p) => {
-                        const checked = cfg.locations.includes(`venue:${p.venue_id}`);
-                        return (
-                          <label key={p.id} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-slate-100 dark:hover:bg-slate-800">
-                            <input type="checkbox" checked={checked} onChange={() => togglePlace(p)} className="h-4 w-4 accent-emerald-600" />
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm">{p.title}</span>
-                              {p.address && <span className="block truncate text-xs text-slate-400">{p.address}</span>}
-                            </span>
-                            <button onClick={(e) => { e.preventDefault(); deletePlace(p); }} title={t("common.delete")}
-                              className="text-slate-300 transition-colors hover:text-red-500 dark:text-slate-600">
-                              <Icon name="trash" className="h-4 w-4" />
-                            </button>
-                          </label>
-                        );
-                      })}
-                      {filteredPlaces.length === 0 && <p className="px-2 py-3 text-center text-xs text-slate-400">{t("discovery.nothingFound")}</p>}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Collected places — hidden per TZ §6 */}
 
             <p className="text-xs text-slate-400">
               {cfg.auto_add_places

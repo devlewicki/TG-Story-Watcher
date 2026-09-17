@@ -295,7 +295,7 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      {Object.entries(SECTIONS).filter(([k]) => k === "additional").map(([sectionKey, section]) => {
+      {Object.entries(SECTIONS).filter(([k]) => false).map(([sectionKey, section]) => {
         const storage = section.storageSection ?? sectionKey;
         return (
           <Card key={sectionKey} className="border-dashed border-slate-300 dark:border-slate-700">

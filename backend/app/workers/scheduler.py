@@ -570,10 +570,24 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             _geo_venue_offset[uid] = (g_offset + geo_budget) % full_geo_count
             logger.info("geo-search: using %d/%d venues (budget=%d)", len(geo_venues), geo_budget, geo_budget)
 
-        locations = manual_locations + auto_locations + geo_venues
-        # Deduplicate across the three sources: auto excludes manually-listed
-        # venues, but geo_venues overlaps with both, so one venue would
-        # otherwise be searched up to three times in a single cycle.
+        # Independent filter logic (per TZ §5):
+        # - Hashtags ON, Radius OFF  → only hashtags
+        # - Hashtags ON, Radius ON   → hashtags + geo-radius venues
+        # - Hashtags OFF, Radius OFF → places & cities (manual + auto)
+        # - Hashtags OFF, Radius ON  → geo-radius venues only
+        hashtags_on = bool(hashtags)
+        geo_on = bool(geo_venues)
+        if hashtags_on:
+            # When hashtags are active, only add geo-radius venues (not
+            # manual/auto locations) so the three categories stay independent.
+            locations = geo_venues
+        elif geo_on:
+            # Hashtags OFF, Radius ON → only geo-radius venues.
+            locations = geo_venues
+        else:
+            # Both OFF → default to places & cities.
+            locations = manual_locations + auto_locations
+        # Deduplicate across the sources.
         locations = _dedupe_locations(locations)
         # Give this account a fresh SearchPosts pacing budget for the cycle.
         discovery._reset_pacing(monitor)

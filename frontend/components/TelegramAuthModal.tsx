@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 import { Button, IconButton, Icon } from "@/components/ui";
+import { friendlyError, validatePhone } from "@/lib/errors";
 
 type FlowStep = "phone" | "code" | "password";
 
@@ -47,7 +48,7 @@ export function TelegramAuthModal({
       setCountdown(SEND_CODE_COOLDOWN);
     } catch (e) {
       const err = e as ApiError;
-      setError(err.message);
+      setError(friendlyError(err));
       if (err.status === 429) {
         const match = err.message.match(/(\d+)/);
         const secs = match
@@ -70,12 +71,14 @@ export function TelegramAuthModal({
 
   const sendCode = async () => {
     setError("");
-    if (phone.length < 5) return setError(t("accounts.phoneError"));
+    const phoneErr = validatePhone(phone);
+    if (phoneErr) return setError(phoneErr);
     await doSendCode(phone);
   };
 
   const confirmCode = async () => {
     setError("");
+    if (!code.trim()) return setError(friendlyError(new Error(t("auth.authError"))));
     setBusy(true);
     try {
       const res = await api.post<{ status: string; needs_password?: boolean }>("/auth/confirm-code", {
@@ -88,19 +91,20 @@ export function TelegramAuthModal({
         onDone();
       }
     } catch (e) {
-      setError((e as Error).message);
+      setError(friendlyError(e));
     }
     setBusy(false);
   };
 
   const confirmPassword = async () => {
     setError("");
+    if (!password.trim()) return setError(friendlyError(new Error(t("auth.authError"))));
     setBusy(true);
     try {
       await api.post("/auth/confirm-password", { phone, password });
       onDone();
     } catch (e) {
-      setError((e as Error).message);
+      setError(friendlyError(e));
     }
     setBusy(false);
   };

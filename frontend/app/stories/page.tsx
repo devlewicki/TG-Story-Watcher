@@ -7,6 +7,7 @@ import { useFetch } from "@/lib/useFetch";
 import { useTranslation } from "@/lib/i18n";
 import { Avatar, Button, Card, Empty, ErrorBanner, Icon, PageHeader, PageLoading } from "@/components/ui";
 import { formatTime } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 
 const PAGE = 200;
 
@@ -30,7 +31,7 @@ export default function StoriesPage() {
       setTotal(cnt?.count ?? 0);
       setItems((prev) => (append ? [...(prev ?? []), ...list] : list));
     } catch (e) {
-      setError((e as Error).message);
+      setError(friendlyError(e));
     } finally {
       setLoading(false);
       setLoadingMore(false);

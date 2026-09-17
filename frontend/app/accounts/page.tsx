@@ -7,6 +7,7 @@ import { useTranslation } from "@/lib/i18n";
 import { Badge, Button, Card, Empty, ErrorBanner, Icon, PageHeader, PageLoading } from "@/components/ui";
 import { TelegramAuthModal } from "@/components/TelegramAuthModal";
 import { timeAgo } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 
 export default function AccountsPage() {
   const { t } = useTranslation();
@@ -61,27 +62,30 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [showRelogin, setShowRelogin] = useState(false);
+  const [actionError, setActionError] = useState("");
   const fullName = [account.first_name, account.last_name].filter(Boolean).join(" ");
   const name = fullName || account.username || account.phone;
 
   const act = async (kind: "start" | "pause") => {
     setBusy(kind);
+    setActionError("");
     try {
       await api.post(`/accounts/${account.id}/${kind}`);
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
     setBusy(null);
   };
 
   const toggleMonitoring = async () => {
     setBusy("monitoring");
+    setActionError("");
     try {
       await api.post(`/accounts/${account.id}/monitoring`, { monitoring: !account.monitoring });
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
     setBusy(null);
   };
@@ -89,11 +93,12 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
   const remove = async () => {
     if (!confirm(t("accounts.deleteConfirm", { name }))) return;
     setBusy("delete");
+    setActionError("");
     try {
       await api.delete(`/accounts/${account.id}`);
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setActionError(friendlyError(e));
     }
     setBusy(null);
   };
@@ -152,6 +157,12 @@ function AccountCard({ account, onChanged }: { account: Account; onChanged: () =
           {busy === "delete" ? "…" : t("common.delete")}
         </Button>
       </div>
+
+      {actionError && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+          {actionError}
+        </div>
+      )}
 
       {showRelogin && (
         <TelegramAuthModal

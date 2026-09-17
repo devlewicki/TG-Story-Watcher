@@ -1,15 +1,28 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { setToken } from "@/lib/api";
 import { useTranslation } from "@/lib/i18n";
 import { Button, Spinner } from "@/components/ui";
+import { friendlyError, validateEmail, validatePassword, validateRequired } from "@/lib/errors";
 
 type AuthMode = "login" | "register";
 
 export function LandingPage({ onAuth }: { onAuth: () => void }) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<AuthMode>("login");
+  const authRef = useRef<HTMLDivElement>(null);
+
+  const scrollToAuth = (targetMode: AuthMode) => {
+    setMode(targetMode);
+    setTimeout(() => {
+      authRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
+  };
+
+  const scrollToFeatures = () => {
+    document.getElementById("features")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const [form, setForm] = useState({
     first_name: "",
     last_name: "",
@@ -17,10 +30,40 @@ export function LandingPage({ onAuth }: { onAuth: () => void }) {
     password: "",
   });
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
 
   const submit = async () => {
     setError("");
+    setFieldErrors({});
+
+    // Client-side validation
+    if (mode === "register") {
+      const errs: Record<string, string> = {};
+      const fn = validateRequired(form.first_name, "Имя");
+      if (fn) errs.first_name = fn;
+      const ln = validateRequired(form.last_name, "Фамилия");
+      if (ln) errs.last_name = ln;
+      const em = validateEmail(form.email);
+      if (em) errs.email = em;
+      const pw = validatePassword(form.password);
+      if (pw) errs.password = pw;
+      if (Object.keys(errs).length > 0) {
+        setFieldErrors(errs);
+        return;
+      }
+    } else {
+      const errs: Record<string, string> = {};
+      const em = validateEmail(form.email);
+      if (em) errs.email = em;
+      const pw = validateRequired(form.password, "Пароль");
+      if (pw) errs.password = pw;
+      if (Object.keys(errs).length > 0) {
+        setFieldErrors(errs);
+        return;
+      }
+    }
+
     setLoading(true);
     try {
       const res = await fetch(`/api/user-auth/${mode === "register" ? "register" : "login"}`, {
@@ -33,7 +76,7 @@ export function LandingPage({ onAuth }: { onAuth: () => void }) {
       setToken(data.token);
       onAuth();
     } catch (e) {
-      setError((e as Error).message);
+      setError(friendlyError(e));
     } finally {
       setLoading(false);
     }
@@ -75,7 +118,7 @@ export function LandingPage({ onAuth }: { onAuth: () => void }) {
           </div>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setMode("login")}
+              onClick={() => scrollToAuth("login")}
               className={`hidden rounded-xl px-4 py-2 text-sm font-medium transition-all sm:block ${
                 mode === "login"
                   ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
@@ -85,7 +128,7 @@ export function LandingPage({ onAuth }: { onAuth: () => void }) {
               {t("common.login")}
             </button>
             <button
-              onClick={() => setMode("register")}
+              onClick={() => scrollToAuth("register")}
               className={`hidden rounded-xl px-4 py-2 text-sm font-medium transition-all sm:block ${
                 mode === "register"
                   ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
@@ -120,24 +163,24 @@ export function LandingPage({ onAuth }: { onAuth: () => void }) {
             <Button
               variant="primary"
               className="!px-6 !py-2.5 !text-base !rounded-xl shadow-lg shadow-emerald-600/25"
-              onClick={() => setMode("register")}
+              onClick={() => scrollToAuth("register")}
             >
               Начать бесплатно
             </Button>
-            <a
-              href="#features"
+            <button
+              onClick={scrollToFeatures}
               className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
             >
               Узнать больше
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
                 <path d="m6 9 6 6 6-6" />
               </svg>
-            </a>
+            </button>
           </div>
         </div>
 
         {/* Auth Card */}
-        <div className="mx-auto mt-16 max-w-md lg:mt-20">
+        <div ref={authRef} className="mx-auto mt-16 max-w-md lg:mt-20">
           <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white/80 shadow-2xl shadow-slate-200/50 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/80 dark:shadow-black/40">
             {/* Tabs */}
             <div className="flex border-b border-slate-100 dark:border-slate-800">
@@ -167,41 +210,51 @@ export function LandingPage({ onAuth }: { onAuth: () => void }) {
             <div className="p-6">
               {mode === "register" && (
                 <div className="mb-4 grid grid-cols-2 gap-3">
-                  <input
-                    value={form.first_name}
-                    onChange={(e) => update("first_name", e.target.value)}
-                    placeholder={t("auth.firstName")}
-                    className={inputClass}
-                  />
-                  <input
-                    value={form.last_name}
-                    onChange={(e) => update("last_name", e.target.value)}
-                    placeholder={t("auth.lastName")}
-                    className={inputClass}
-                  />
+                  <div>
+                    <input
+                      value={form.first_name}
+                      onChange={(e) => { update("first_name", e.target.value); setFieldErrors((p) => ({ ...p, first_name: "" })); }}
+                      placeholder={t("auth.firstName")}
+                      className={`${inputClass} ${fieldErrors.first_name ? "sw-input-error" : ""}`}
+                    />
+                    {fieldErrors.first_name && <p className="mt-1 text-xs text-red-500">{fieldErrors.first_name}</p>}
+                  </div>
+                  <div>
+                    <input
+                      value={form.last_name}
+                      onChange={(e) => { update("last_name", e.target.value); setFieldErrors((p) => ({ ...p, last_name: "" })); }}
+                      placeholder={t("auth.lastName")}
+                      className={`${inputClass} ${fieldErrors.last_name ? "sw-input-error" : ""}`}
+                    />
+                    {fieldErrors.last_name && <p className="mt-1 text-xs text-red-500">{fieldErrors.last_name}</p>}
+                  </div>
                 </div>
               )}
-              <input
-                value={form.email}
-                onChange={(e) => update("email", e.target.value)}
-                placeholder={t("auth.email")}
-                type="email"
-                className={`mb-3 ${inputClass}`}
-              />
-              <input
-                value={form.password}
-                onChange={(e) => update("password", e.target.value)}
-                placeholder={t("auth.password")}
-                type="password"
-                className={`${inputClass} ${
-                  mode === "register" ? "" : ""
-                }`}
-              />
-              {mode === "register" && (
-                <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-                  Минимум 8 символов
-                </p>
-              )}
+              <div className="mb-3">
+                <input
+                  value={form.email}
+                  onChange={(e) => { update("email", e.target.value); setFieldErrors((p) => ({ ...p, email: "" })); }}
+                  placeholder={t("auth.email")}
+                  type="email"
+                  className={`${inputClass} ${fieldErrors.email ? "sw-input-error" : ""}`}
+                />
+                {fieldErrors.email && <p className="mt-1 text-xs text-red-500">{fieldErrors.email}</p>}
+              </div>
+              <div>
+                <input
+                  value={form.password}
+                  onChange={(e) => { update("password", e.target.value); setFieldErrors((p) => ({ ...p, password: "" })); }}
+                  placeholder={t("auth.password")}
+                  type="password"
+                  className={`${inputClass} ${fieldErrors.password ? "sw-input-error" : ""}`}
+                />
+                {fieldErrors.password && <p className="mt-1 text-xs text-red-500">{fieldErrors.password}</p>}
+                {mode === "register" && !fieldErrors.password && (
+                  <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                    Минимум 8 символов
+                  </p>
+                )}
+              </div>
 
               {error && (
                 <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
