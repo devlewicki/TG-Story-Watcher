@@ -279,25 +279,36 @@ async def forget_account(account_id: int) -> None:
 
 
 async def mark_account_auth_required(
-    account_id: int, *, drop_session: bool = False
+    account_id: int,
+    *,
+    drop_session: bool = False,
+    reason: str | None = None,
+    exc: BaseException | None = None,
+    source: str | None = None,
 ) -> None:
     """Mark an account as needing re-login (``AUTH_REQUIRED``).
 
     Called when Telegram invalidates the account's auth key (logout /
-    ``AuthKeyUnregisteredError`` / ``AuthKeyDuplicatedError``). Stops monitoring
-    and drops the cached client. The dead ``session_path`` file is only removed
-    when ``drop_session=True`` (an invalidated/duplicated auth key) — for a
-    merely logged-out session it is kept so the re-login flow can reuse it.
+    ``AuthKeyUnregisteredError`` / ``AuthKeyDuplicatedError``). Drops the cached
+    client. The dead ``session_path`` file is only removed when
+    ``drop_session=True`` (an invalidated/duplicated auth key) — for a merely
+    logged-out session it is kept so the re-login flow can reuse it.
+
+    The user's ``monitoring`` intent is PRESERVED so a re-login resumes the
+    account automatically instead of leaving it dead until manual intervention
+    (the Oct 01 incident).  A ``account_status`` activity event with the
+    diagnosis is always written.
     """
     from ..db import SessionLocal
+    from ..services import account_state as astate
 
     await drop_client(account_id)
     db = SessionLocal()
     try:
         acc = db.get(TelegramAccount, account_id)
         if acc is not None:
+            prev_status, prev_monitoring = acc.status, acc.monitoring
             acc.status = AccountStatus.AUTH_REQUIRED.value
-            acc.monitoring = False
             if drop_session and acc.session_path and os.path.isfile(acc.session_path):
                 for suffix in ("", "-journal", "-wal", "-shm"):
                     try:
@@ -305,6 +316,17 @@ async def mark_account_auth_required(
                     except OSError:
                         pass
                 acc.session_path = None
+            astate.log_transition(
+                account_id=acc.id,
+                prev_status=prev_status,
+                new_status=acc.status,
+                prev_monitoring=prev_monitoring,
+                new_monitoring=acc.monitoring,
+                source=source or astate.SOURCE_CLIENT_MANAGER,
+                reason=reason or "account marked AUTH_REQUIRED",
+                exc=exc,
+                db=db,
+            )
         db.commit()
     except Exception:
         db.rollback()
@@ -332,14 +354,22 @@ async def start_account(account):
         account.status = AccountStatus.DISCONNECTED.value
         account.monitoring = False
         return None
+    from ..services import account_state as astate
+
     client = await connect(account)
     try:
-        if await client.is_user_authorized():
+        auth_state = await astate.check_authorization(client, account.id)
+        if auth_state == "authorized":
             await update_account_identity(account, client)
             account.status = AccountStatus.ACTIVE.value
-        else:
+        elif auth_state == "unauthorized":
+            # Confirmed session revocation: needs re-login. Keep monitoring
+            # intent and the session file so a re-login resumes automatically.
             account.status = AccountStatus.DISCONNECTED.value
-            account.monitoring = False
+        else:
+            # Transient RPC/network failure — do NOT demote the account or kill
+            # monitoring (the Sep 26 false-DISCONNECTED root cause).
+            account.status = AccountStatus.ERROR.value
     except Exception:
         account.status = AccountStatus.ERROR.value
     return client
@@ -568,6 +598,10 @@ async def finish_login(phone: str, account):
         _save_session_as_sqlite(login, target)
         account.session_path = target
         await update_account_identity(account, login)
+        # Warm the entity cache (contacts) and re-save so a worker client built
+        # from this file can resolve peers immediately after a re-login.
+        await _warm_entity_cache(login, account)
+        _save_session_as_sqlite(login, target)
         _clients[account.id] = login
         return login
     except Exception:
@@ -576,6 +610,38 @@ async def finish_login(phone: str, account):
         except Exception:
             pass
         raise
+
+
+async def _warm_entity_cache(client, account) -> None:
+    """Best-effort warm-up of the Telegram entity cache after a fresh login.
+
+    A freshly created session file (``finish_login`` → ``_save_session_as_sqlite``)
+    carries almost no entities — typically just the account itself.  A worker
+    client built from that file then fails to resolve non-contact peers and
+    marks queue items ``FAILED: peer not found`` (the Oct 01 incident: 22 items).
+
+    ``GetContactsRequest(hash=0)`` returns the full contact list, and Telethon
+    records every contact (id + access_hash) into the session along the way.
+    The file is re-saved afterwards so a new worker process sees the entities.
+    Never raises — warm-up is best-effort and must not fail a login.
+    """
+    from telethon import functions
+
+    try:
+        if not client.is_connected():
+            await client.connect()
+        if not client.has_authorization():
+            return
+        await asyncio.wait_for(
+            client(functions.contacts.GetContactsRequest(hash=0)),
+            timeout=120.0,
+        )
+        logger.info(
+            "warmed entity cache for account %s (%d known entities)",
+            account.id, len(getattr(client.session, "_entities", ()) or ()),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("entity cache warm-up failed for account %s: %s", account.id, exc)
 
 
 def _save_session_as_sqlite(client, target_path: str) -> None:

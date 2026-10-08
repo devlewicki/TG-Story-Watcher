@@ -3,6 +3,11 @@ services:
     build: ./docker/vpn
     image: tg-story-watcher-vpn:latest
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       VPN_SUBSCRIPTION_URL: ${VPN_SUBSCRIPTION_URL:-}
       VPN_REFRESH_INTERVAL: ${VPN_REFRESH_INTERVAL:-3600}
@@ -27,6 +32,11 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-storywatcher}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-storywatcher}
@@ -42,6 +52,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -78,6 +93,11 @@ services:
         condition: service_healthy
     ports:
       - "9000:8000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     volumes:
       - sessions_data:/data/sessions
       - backups_data:/data/backups
@@ -101,6 +121,11 @@ services:
       TELEGRAM_PROXY_HOST: ${TELEGRAM_PROXY_HOST:-}
       TELEGRAM_PROXY_PORT: ${TELEGRAM_PROXY_PORT:-}
       TELEGRAM_PROXY_SECRET: ${TELEGRAM_PROXY_SECRET:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck"]
       interval: 15s

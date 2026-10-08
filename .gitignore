@@ -1,6 +1,9 @@
 **.env
 .env
 .env.*
+spec/
+*.session
+*.session-journal
 __pycache__/
 *.pyc
 node_modules/
@@ -11,7 +14,5 @@ dist/
 venv/
 .pytest_cache/
 .mypy_cache/
-*.session
-*.session-journal
 backend/data/
 backend/sessions/

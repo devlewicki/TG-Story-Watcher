@@ -141,8 +141,22 @@ async def _finalize(phone: str, db: Session, user_id: int) -> AuthStatusOut:
         account.username = getattr(me, "username", None) if me else None
         account.first_name = getattr(me, "first_name", None) if me else None
         account.last_name = getattr(me, "last_name", None) if me else None
+        prev_status, prev_monitoring = account.status, account.monitoring
         account.status = AccountStatus.ACTIVE.value
         db.commit()
+        # Record the completed (re-)authorization so the account-status trail
+        # shows how the account became ACTIVE again.
+        from ..services import account_state as astate
+
+        astate.log_transition(
+            account_id=account.id,
+            prev_status=prev_status,
+            new_status=account.status,
+            prev_monitoring=prev_monitoring,
+            new_monitoring=account.monitoring,
+            source=astate.SOURCE_AUTH,
+            reason="successful (re-)authorization completed",
+        )
         # Fresh users (seeded at registration) get hashtag search enabled and
         # monitoring auto-started right after their first Telegram authorization.
         apply_wiring_if_new_user(db, user_id, account)

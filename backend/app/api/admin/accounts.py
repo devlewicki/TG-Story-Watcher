@@ -141,10 +141,21 @@ async def start_account(
     acc = db.get(TelegramAccount, account_id)
     if acc is None:
         raise HTTPException(404, "account not found")
+    prev_status, prev_monitoring = acc.status, acc.monitoring
     acc.monitoring = True
     if acc.status in (AccountStatus.PAUSED.value, AccountStatus.ERROR.value, AccountStatus.DISCONNECTED.value):
         acc.status = AccountStatus.ACTIVE.value
     db.commit()
+    from ...services import account_state as astate
+    astate.log_transition_if_changed(
+        account_id=acc.id,
+        prev_status=prev_status,
+        new_status=acc.status,
+        prev_monitoring=prev_monitoring,
+        new_monitoring=acc.monitoring,
+        source="admin",
+        reason="admin start",
+    )
     admin_audit.audit(
         admin_id=admin.id, admin_username=admin.username, action="account.start",
         target=f"account:{account_id}", ip=client_ip(request),
@@ -162,9 +173,20 @@ async def pause_account(
     acc = db.get(TelegramAccount, account_id)
     if acc is None:
         raise HTTPException(404, "account not found")
+    prev_status, prev_monitoring = acc.status, acc.monitoring
     acc.status = AccountStatus.PAUSED.value
     acc.monitoring = False
     db.commit()
+    from ...services import account_state as astate
+    astate.log_transition_if_changed(
+        account_id=acc.id,
+        prev_status=prev_status,
+        new_status=acc.status,
+        prev_monitoring=prev_monitoring,
+        new_monitoring=acc.monitoring,
+        source="admin",
+        reason="admin pause",
+    )
     try:
         from ...telegram import client_manager as cm
 
@@ -188,6 +210,7 @@ async def reconnect_account(
     acc = db.get(TelegramAccount, account_id)
     if acc is None:
         raise HTTPException(404, "account not found")
+    prev_status, prev_monitoring = acc.status, acc.monitoring
     try:
         from ...telegram import client_manager as cm
 
@@ -202,6 +225,16 @@ async def reconnect_account(
         raise HTTPException(502, f"reconnect failed: {exc}")
     acc.status = AccountStatus.ACTIVE.value
     db.commit()
+    from ...services import account_state as astate
+    astate.log_transition_if_changed(
+        account_id=acc.id,
+        prev_status=prev_status,
+        new_status=acc.status,
+        prev_monitoring=prev_monitoring,
+        new_monitoring=acc.monitoring,
+        source="admin",
+        reason="admin reconnect",
+    )
     admin_audit.audit(
         admin_id=admin.id, admin_username=admin.username, action="account.reconnect",
         target=f"account:{account_id}", ip=client_ip(request),

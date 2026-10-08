@@ -258,6 +258,39 @@ class BackupService:
     def _sessions_dir() -> str:
         return get_settings().sessions_dir
 
+    @staticmethod
+    def _copy_session_snapshot(src_path: str, dest_path: str) -> bool:
+        """Consistently snapshot a Telethon SQLite session file.
+
+        The live worker keeps sessions in WAL mode, so a plain file copy can
+        drop uncheckpointed frames and archive a half-written session that
+        restores as an EMPTY database (silent auth loss — the TZ root cause).
+        The sqlite3 backup API reads the source (including its WAL) and writes
+        a consistent single-file snapshot into the archive staging dir.
+
+        Returns True when a backup was taken; on error falls back to a plain
+        file copy (best-effort, backup must never abort the whole job).
+        """
+        import sqlite3
+
+        try:
+            src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True, timeout=5.0)
+            dst = sqlite3.connect(dest_path)
+            try:
+                with dst:
+                    src.backup(dst)
+            finally:
+                dst.close()
+                src.close()
+            return True
+        except sqlite3.Error as exc:
+            logger.warning(
+                "session snapshot failed for %s (falling back to plain copy): %s",
+                src_path, exc,
+            )
+            shutil.copy2(src_path, dest_path)
+            return False
+
     def _collect_sessions_into(self, dest: str) -> int:
         sessions_root = self._sessions_dir()
         os.makedirs(dest, exist_ok=True)
@@ -265,8 +298,8 @@ class BackupService:
         if os.path.isdir(sessions_root):
             for name in sorted(os.listdir(sessions_root)):
                 path = os.path.join(sessions_root, name)
-                if os.path.isfile(path) and (name.endswith(".session") or name.endswith(".session-journal")):
-                    shutil.copy2(path, os.path.join(dest, name))
+                if os.path.isfile(path) and name.endswith(".session"):
+                    self._copy_session_snapshot(path, os.path.join(dest, name))
                     count += 1
         return count
 

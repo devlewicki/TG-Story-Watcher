@@ -23,7 +23,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.exc import StaleDataError
 
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError
 
 from ..db import SessionLocal
 from ..models import (
@@ -33,6 +33,7 @@ from ..models import (
     TelegramAccount,
 )
 from ..queue.processor import process_queue_item
+from ..services import account_state as astate
 from ..services import activity
 from ..services.settings_service import SettingsService
 from ..api.timezone import user_today
@@ -43,6 +44,11 @@ logger = logging.getLogger("storywatcher.worker")
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Re-exported for convenience/tests: probes authorization with transient vs
+# confirmed classification (see account_state.check_authorization).
+check_authorization = astate.check_authorization
 
 
 class RateLimiter:
@@ -173,6 +179,45 @@ ACCOUNT_DRAIN_TIMEOUT = 300  # seconds to wait for full drain_queue per account
 ACCOUNT_DRAIN_PARALLEL = int(os.environ.get("WORKER_ACCOUNT_PARALLEL", "5"))
 
 
+def _handle_auth_key_failure(
+    db: Session,
+    account: TelegramAccount,
+    exc: BaseException,
+    *,
+    requested_drop: bool,
+) -> None:
+    """Uniformly handle a confirmed auth-key failure: mark AUTH_REQUIRED, keep the
+    user's monitoring intent, drop the session file only when Telegram invalidated
+    the key itself, and persist a diagnostic event."""
+    category, drop = astate.classify_telegram_error(exc)
+    drop_session = drop or requested_drop
+    prev_status, prev_monitoring = account.status, account.monitoring
+    account.status = AccountStatus.AUTH_REQUIRED.value
+    if drop_session and account.session_path and os.path.isfile(account.session_path):
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            try:
+                os.remove(account.session_path + suffix)
+            except OSError:
+                pass
+        account.session_path = None
+    astate.log_transition(
+        account_id=account.id,
+        prev_status=prev_status,
+        new_status=account.status,
+        prev_monitoring=prev_monitoring,
+        new_monitoring=account.monitoring,
+        source=astate.SOURCE_WORKER,
+        reason=f"confirmed auth-key failure ({category}); "
+               f"session file {'removed' if drop_session else 'kept'}",
+        exc=exc,
+        db=db,
+    )
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
 async def drain_queue(db: Session, account: TelegramAccount) -> int:
     """Process all currently-due queue entries for a single account.
     Returns the number of successfully processed items."""
@@ -180,17 +225,13 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
         return 0
     try:
         client = await asyncio.wait_for(cm.connect(account), timeout=ACCOUNT_CONNECT_TIMEOUT)
-    except AuthKeyDuplicatedError:
+    except AuthKeyDuplicatedError as exc:
         logger.error("drain_queue(%s) AuthKeyDuplicatedError on connect — session invalidated by IP change", account.id)
-        account.status = AccountStatus.AUTH_REQUIRED.value
-        account.monitoring = False
-        if account.session_path and os.path.isfile(account.session_path):
-            try:
-                os.remove(account.session_path)
-            except OSError:
-                pass
-        account.session_path = None
-        db.commit()
+        _handle_auth_key_failure(db, account, exc, requested_drop=True)
+        return 0
+    except (AuthKeyUnregisteredError, UnauthorizedError) as exc:
+        logger.error("drain_queue(%s) session unregistered on connect — marking AUTH_REQUIRED", account.id)
+        _handle_auth_key_failure(db, account, exc, requested_drop=False)
         return 0
     except (ConnectionError, OSError, TimeoutError) as exc:
         logger.warning("drain_queue(%s) connect failed (%s), attempting reconnect", account.id, type(exc).__name__)
@@ -202,10 +243,33 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
     if not client.is_connected():
         return 0
 
-    if not await asyncio.wait_for(client.is_user_authorized(), timeout=ACCOUNT_CONNECT_TIMEOUT):
-        account.status = AccountStatus.DISCONNECTED.value
-        account.monitoring = False
-        # Do NOT clear session_path — preserve auth data for re-auth.
+    auth_state = await check_authorization(client, account.id)
+    if auth_state == "transient":
+        # A transient Telegram/network hiccup must NOT flip the account to
+        # DISCONNECTED / AUTH_REQUIRED or switch off user monitoring.  Leave the
+        # state untouched and retry on the bounded backoff; the next sweep picks
+        # it up again.
+        logger.warning("drain_queue(%s) auth check transient — leaving state intact and backing off", account.id)
+        return 0
+    if auth_state == "unauthorized":
+        # Session revoked / required re-login: a confirmed auth loss, not a
+        # connection blip.  Prompt for re-login but keep the user's monitoring
+        # intent so the account resumes automatically after re-auth.
+        prev_status, prev_monitoring = account.status, account.monitoring
+        account.status = AccountStatus.AUTH_REQUIRED.value
+        if account.session_path and not os.path.isfile(account.session_path):
+            # Session file vanished underneath us; drop the stale path.
+            account.session_path = None
+        astate.log_transition(
+            account_id=account.id,
+            prev_status=prev_status,
+            new_status=account.status,
+            prev_monitoring=prev_monitoring,
+            new_monitoring=account.monitoring,
+            source=astate.SOURCE_WORKER,
+            reason="confirmed session revocation while checking authorization",
+            db=db,
+        )
         db.commit()
         return 0
 
@@ -299,6 +363,23 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
                     except asyncio.TimeoutError:
                         _requeue(item_db, item, "processing timed out")
                         res = {"item": item.id, "status": "TIMEOUT", "reconnect": True}
+                    except Exception as exc:  # noqa: BLE001
+                        # ``process_queue_item`` normally marks the item FAILED
+                        # itself.  But a confirmed auth-key failure must ALSO
+                        # surface at the account level (previously it was
+                        # swallowed by ``asyncio.gather(return_exceptions=True)``
+                        # and the account stayed ACTIVE while every item went
+                        # FAILED — a silent account death).  Remember it and
+                        # ``_drain_account`` will raise it to trigger the
+                        # AUTH_REQUIRED handler.
+                        category, _drop = astate.classify_telegram_error(exc)
+                        if (
+                            category in (astate.AUTH_DUPLICATED, astate.AUTH_UNREGISTERED)
+                            or isinstance(exc, (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError))
+                        ):
+                            nonlocal_holder["auth_error"] = exc
+                        _requeue(item_db, item, f"processing failed: {type(exc).__name__}")
+                        res = {"item": item.id, "status": "FAILED"}
                 if isinstance(res, dict) and res.get("reconnect"):
                     nonlocal_holder["reconnect"] = True
                 results.append(res)
@@ -306,8 +387,15 @@ async def drain_queue(db: Session, account: TelegramAccount) -> int:
             finally:
                 item_db.close()
 
-    nonlocal_holder = {"reconnect": False}
+    nonlocal_holder = {"reconnect": False, "auth_error": None}
     await asyncio.gather(*(_handle(i) for i in items), return_exceptions=True)
+
+    # Surface a confirmed auth-key failure out of the batch so ``_drain_account``
+    # can mark the account AUTH_REQUIRED (one per batch is enough).
+    auth_error = nonlocal_holder.get("auth_error")
+    if auth_error is not None:
+        raise auth_error
+
     reconnect_requested = nonlocal_holder["reconnect"]
 
     # A timed-out request usually means the client's transport is broken.
@@ -387,11 +475,21 @@ async def _drain_account(db: Session, account: TelegramAccount) -> int:
                 )
                 db.rollback()
                 return 0
-            # AuthKey duplicated: VPN IP changed — session is permanently
-            # invalidated.  Delete the session file and mark AUTH_REQUIRED.
-            is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
-            if is_auth_dup:
-                logger.error("drain_queue(%s) AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
+            # AuthKey failure: the session is invalidated (duplicated key) or
+            # revoked (unregistered/logged out).  Drop the client and mark
+            # AUTH_REQUIRED; keep the user's monitoring intent so the account
+            # resumes automatically after a fresh login.
+            category, drop = astate.classify_telegram_error(exc)
+            is_auth = (
+                category in (astate.AUTH_DUPLICATED, astate.AUTH_UNREGISTERED, astate.UNAUTHORIZED)
+                or isinstance(exc, AuthKeyDuplicatedError)
+                or "authorization key" in str(exc).lower()
+            )
+            if is_auth:
+                logger.error(
+                    "drain_queue(%s) auth failure (%s) — marking AUTH_REQUIRED, dropping client",
+                    account.id, category,
+                )
                 db.rollback()
                 try:
                     await cm.drop_client(account.id)
@@ -402,14 +500,27 @@ async def _drain_account(db: Session, account: TelegramAccount) -> int:
                 try:
                     acc2 = db2.get(TelegramAccount, account.id)
                     if acc2 is not None:
+                        prev_status, prev_monitoring = acc2.status, acc2.monitoring
                         acc2.status = AccountStatus.AUTH_REQUIRED.value
-                        acc2.monitoring = False
-                        if acc2.session_path and os.path.isfile(acc2.session_path):
-                            try:
-                                os.remove(acc2.session_path)
-                            except OSError:
-                                pass
-                        acc2.session_path = None
+                        if drop and acc2.session_path and os.path.isfile(acc2.session_path):
+                            for suffix in ("", "-journal", "-wal", "-shm"):
+                                try:
+                                    os.remove(acc2.session_path + suffix)
+                                except OSError:
+                                    pass
+                            acc2.session_path = None
+                        astate.log_transition(
+                            account_id=acc2.id,
+                            prev_status=prev_status,
+                            new_status=acc2.status,
+                            prev_monitoring=prev_monitoring,
+                            new_monitoring=acc2.monitoring,
+                            source=astate.SOURCE_WORKER,
+                            reason=f"confirmed auth-key failure while draining ({category}); "
+                                   f"session file {'removed' if drop else 'kept'}, client dropped",
+                            exc=exc,
+                            db=db2,
+                        )
                     db2.commit()
                 except Exception:
                     db2.rollback()
@@ -467,7 +578,13 @@ async def run_once() -> int:
             .filter(
                 TelegramAccount.monitoring.is_(True),
                 TelegramAccount.session_path.isnot(None),
-                TelegramAccount.status != AccountStatus.DISCONNECTED.value,
+                TelegramAccount.status.notin_(
+                    [
+                        AccountStatus.DISCONNECTED.value,
+                        AccountStatus.AUTH_REQUIRED.value,
+                        AccountStatus.BANNED_OR_RESTRICTED.value,
+                    ]
+                ),
             )
             .all()
         ]

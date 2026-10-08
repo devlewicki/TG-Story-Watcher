@@ -85,9 +85,11 @@ def create_account(payload: AccountCreate, db: Db, user_id: Annotated[int, Depen
 async def start_account(account_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     acc = await _load(db, account_id)
     if acc.user_id != user_id: raise HTTPException(404, "account not found")
+    prev_status, prev_monitoring = acc.status, acc.monitoring
     acc.monitoring = True
     if acc.status in (AccountStatus.PAUSED.value, AccountStatus.ERROR.value, AccountStatus.DISCONNECTED.value): acc.status = AccountStatus.ACTIVE.value
     db.commit()
+    _log_api_transition(db, acc, prev_status, prev_monitoring, source="api", reason="user start")
     return {"id": acc.id, "status": acc.status, "monitoring": acc.monitoring, "authorized": None}
 
 
@@ -95,9 +97,11 @@ async def start_account(account_id: int, db: Db, user_id: Annotated[int, Depends
 async def pause_account(account_id: int, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     acc = await _load(db, account_id)
     if acc.user_id != user_id: raise HTTPException(404, "account not found")
+    prev_status, prev_monitoring = acc.status, acc.monitoring
     acc.status = AccountStatus.PAUSED.value
     acc.monitoring = False
     db.commit()
+    _log_api_transition(db, acc, prev_status, prev_monitoring, source="api", reason="user pause")
     return {"id": acc.id, "status": acc.status}
 
 
@@ -105,9 +109,26 @@ async def pause_account(account_id: int, db: Db, user_id: Annotated[int, Depends
 async def set_monitoring(account_id: int, payload: MonitoringUpdate, db: Db, user_id: Annotated[int, Depends(current_user_id)]):
     acc = await _load(db, account_id)
     if acc.user_id != user_id: raise HTTPException(404, "account not found")
+    prev_status, prev_monitoring = acc.status, acc.monitoring
     acc.monitoring = payload.monitoring
     db.commit()
+    _log_api_transition(db, acc, prev_status, prev_monitoring, source="api", reason=f"user set monitoring={payload.monitoring}")
     return {"id": acc.id, "monitoring": acc.monitoring}
+
+
+def _log_api_transition(db, acc, prev_status, prev_monitoring, *, source, reason):
+    from ..services import account_state as astate
+
+    astate.log_transition_if_changed(
+        account_id=acc.id,
+        prev_status=prev_status,
+        new_status=acc.status,
+        prev_monitoring=prev_monitoring,
+        new_monitoring=acc.monitoring,
+        source=source,
+        reason=reason,
+        db=db,
+    )
 
 
 @router.delete("/accounts/{account_id}", response_model=dict)

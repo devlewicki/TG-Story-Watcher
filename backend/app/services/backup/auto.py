@@ -16,14 +16,22 @@ logger = logging.getLogger("storywatcher.backup.auto")
 _last_auto_date: str | None = None
 
 
-def _load_settings(db) -> dict:
+def _load_settings(db) -> dict | None:
+    """Return parsed ``backup:auto`` settings, or None when the row is absent.
+
+    A missing row means "never configured": we then default to enabled so a
+    fresh deployment gets daily backups out of the box instead of running with
+    no safety net.  An *explicitly disabled* row (``{"enabled": false}``) stays
+    disabled — the operator's choice wins over the default.
+    """
     from ...models import SettingsStore
 
     try:
         row = db.get(SettingsStore, "backup:auto")
-        if row is None:
-            return {}
-        return json.loads(row.value) or {}
+        if row is None or not row.value:
+            return None
+        parsed = json.loads(row.value)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -37,6 +45,12 @@ def run_auto_backup_check() -> None:
     db = SessionLocal()
     try:
         cfg = _load_settings(db)
+        if cfg is None:
+            # Never configured: default to enabled (daily at 04:00 UTC,
+            # keep 7).  A row that exists but is explicitly disabled is
+            # respected as-is.
+            cfg = {"enabled": True, "schedule_hour_utc": 4, "retention": 7}
+            logger.info("backup:auto not configured — using defaults (enabled, 04:00 UTC, keep 7)")
         if not cfg.get("enabled"):
             return
         now = datetime.now(timezone.utc)

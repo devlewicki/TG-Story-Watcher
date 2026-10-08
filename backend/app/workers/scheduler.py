@@ -27,6 +27,7 @@ DISCOVERY_ACCOUNT_TIMEOUT = 600
 
 from ..db import SessionLocal
 from ..models import AccountStatus, TelegramAccount
+from ..services import account_state as astate
 from ..services.settings_service import SettingsService
 from ..api.timezone import user_today
 from ..stories import discovery
@@ -48,12 +49,41 @@ async def sync_account(account: TelegramAccount) -> int:
                 return 0
             client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
             if not client.is_connected():
+                prev_status, prev_monitoring = acc.status, acc.monitoring
                 acc.status = AccountStatus.DISCONNECTED.value
+                astate.log_transition_if_changed(
+                    account_id=acc.id,
+                    prev_status=prev_status,
+                    new_status=acc.status,
+                    prev_monitoring=prev_monitoring,
+                    new_monitoring=acc.monitoring,
+                    source=astate.SOURCE_SCHEDULER,
+                    reason="telegram client not connected (sync)",
+                    db=db,
+                )
                 db.commit()
                 return 0
-            if not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
-                acc.status = AccountStatus.DISCONNECTED.value
-                acc.monitoring = False
+            auth_state = await astate.check_authorization(client, acc.id, timeout=CONNECT_TIMEOUT)
+            if auth_state == "transient":
+                # Reachability/RPC blip: do not demote the account or switch off
+                # monitoring.  The bounded backoff inside check_authorization
+                # prevents a fast retry loop.
+                logger.warning("sync_account(%s) auth check transient — leaving state intact", account.id)
+                db.rollback()
+                return 0
+            if auth_state == "unauthorized":
+                prev_status, prev_monitoring = acc.status, acc.monitoring
+                acc.status = AccountStatus.AUTH_REQUIRED.value
+                astate.log_transition(
+                    account_id=acc.id,
+                    prev_status=prev_status,
+                    new_status=acc.status,
+                    prev_monitoring=prev_monitoring,
+                    new_monitoring=acc.monitoring,
+                    source=astate.SOURCE_SCHEDULER,
+                    reason="confirmed session revocation while checking authorization (sync)",
+                    db=db,
+                )
                 # Do NOT clear session_path — the file may still be
                 # valid but need re-auth. Clearing it destroys the
                 # auth data and makes the account disappear.
@@ -77,29 +107,32 @@ async def sync_account(account: TelegramAccount) -> int:
                 db.close()
                 await asyncio.sleep(2 ** _attempt)
                 continue
-            # AuthKey duplicated: VPN IP changed — session is permanently
-            # invalidated.  Delete the session file and mark AUTH_REQUIRED so
-            # the user can re-login from the web UI.
-            is_auth_dup = isinstance(exc, AuthKeyDuplicatedError) or "authorization key" in str(exc).lower()
-            if is_auth_dup:
-                logger.error("sync_account(%s) AuthKeyDuplicatedError — session invalidated by IP change, marking AUTH_REQUIRED", account.id)
+            # AuthKey failure: session invalidated (duplicated) or revoked
+            # (unregistered/logged out).  Classify so we only delete the session
+            # file when the key itself was duplicated, and hand over the precise
+            # exception for diagnostics.
+            category, drop = astate.classify_telegram_error(exc)
+            is_auth = category in (
+                astate.AUTH_DUPLICATED,
+                astate.AUTH_UNREGISTERED,
+                astate.UNAUTHORIZED,
+            ) or isinstance(exc, (AuthKeyDuplicatedError, AuthKeyUnregisteredError, UnauthorizedError))
+            if is_auth:
+                logger.error(
+                    "sync_account(%s) auth failure (%s) — marking AUTH_REQUIRED%s",
+                    account.id, category,
+                    " (session invalidated by IP change)" if drop else "",
+                )
                 db.rollback()
                 db.close()
                 try:
-                    await cm.mark_account_auth_required(account.id, drop_session=True)
-                except Exception:
-                    pass
-                return 0
-            # Auth key unregistered: Telegram revoked the session (logout /
-            # forced termination) — the account needs a fresh login, but the
-            # session file is kept so the re-login flow can reuse it.
-            is_auth_unreg = isinstance(exc, (AuthKeyUnregisteredError, UnauthorizedError)) or "key is not registered" in str(exc).lower()
-            if is_auth_unreg:
-                logger.error("sync_account(%s) session unregistered — marking AUTH_REQUIRED", account.id)
-                db.rollback()
-                db.close()
-                try:
-                    await cm.mark_account_auth_required(account.id, drop_session=False)
+                    await cm.mark_account_auth_required(
+                        account.id,
+                        drop_session=drop,
+                        reason=f"confirmed auth-key failure while syncing ({category})",
+                        exc=exc,
+                        source=astate.SOURCE_SCHEDULER,
+                    )
                 except Exception:
                     pass
                 return 0
@@ -148,15 +181,29 @@ async def run_analytics_once() -> None:
             acc = local.get(TelegramAccount, account.id)
             if acc is not None and acc.session_path and acc.status not in (AccountStatus.DISCONNECTED.value, AccountStatus.AUTH_REQUIRED.value):
                 client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
-                if client.is_connected() and await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
-                    await _maybe_update_identity(acc, client)
-                    local.commit()
-                    await collect_account(acc.id, local, client)
+                if client.is_connected():
+                    auth_state = await astate.check_authorization(client, acc.id, timeout=CONNECT_TIMEOUT)
+                    if auth_state == "authorized":
+                        await _maybe_update_identity(acc, client)
+                        local.commit()
+                        await collect_account(acc.id, local, client)
+                    elif auth_state == "unauthorized":
+                        # Confirmed revocation surfaced during the analytics pass.
+                        local.close()
+                        await cm.mark_account_auth_required(
+                            acc.id, drop_session=False,
+                            reason="confirmed session revocation (analytics)",
+                            source=astate.SOURCE_SCHEDULER,
+                        )
+                        local = SessionLocal()
+                        continue
         except AuthKeyDuplicatedError as exc:
             logger.warning("analytics sync account=%s AuthKeyDuplicatedError — marking AUTH_REQUIRED", account.id)
             local.close()
             try:
-                await cm.mark_account_auth_required(account.id, drop_session=True)
+                await cm.mark_account_auth_required(account.id, drop_session=True,
+                                                    reason="auth key duplicated (analytics)",
+                                                    exc=exc, source=astate.SOURCE_SCHEDULER)
             except Exception:
                 pass
             continue
@@ -164,7 +211,9 @@ async def run_analytics_once() -> None:
             logger.warning("analytics sync account=%s session unregistered — marking AUTH_REQUIRED", account.id)
             local.close()
             try:
-                await cm.mark_account_auth_required(account.id, drop_session=False)
+                await cm.mark_account_auth_required(account.id, drop_session=False,
+                                                    reason="session unregistered (analytics)",
+                                                    exc=exc, source=astate.SOURCE_SCHEDULER)
             except Exception:
                 pass
             continue
@@ -180,7 +229,17 @@ async def run_once() -> None:
     try:
         accounts = (
             db.query(TelegramAccount)
-            .filter(TelegramAccount.monitoring.is_(True), TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value)
+            .filter(
+                TelegramAccount.monitoring.is_(True),
+                TelegramAccount.session_path.isnot(None),
+                TelegramAccount.status.notin_(
+                    [
+                        AccountStatus.DISCONNECTED.value,
+                        AccountStatus.AUTH_REQUIRED.value,
+                        AccountStatus.BANNED_OR_RESTRICTED.value,
+                    ]
+                ),
+            )
             .all()
         )
     finally:
@@ -338,7 +397,17 @@ async def run_discovery_once() -> None:
     try:
         accounts = (
             db.query(TelegramAccount)
-            .filter(TelegramAccount.monitoring.is_(True), TelegramAccount.session_path.isnot(None), TelegramAccount.status != AccountStatus.DISCONNECTED.value)
+            .filter(
+                TelegramAccount.monitoring.is_(True),
+                TelegramAccount.session_path.isnot(None),
+                TelegramAccount.status.notin_(
+                    [
+                        AccountStatus.DISCONNECTED.value,
+                        AccountStatus.AUTH_REQUIRED.value,
+                        AccountStatus.BANNED_OR_RESTRICTED.value,
+                    ]
+                ),
+            )
             .all()
         )
     finally:
@@ -426,7 +495,11 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
     db = SessionLocal()
     try:
         acc = db.get(TelegramAccount, account.id)
-        if acc is None or not acc.session_path or acc.status == AccountStatus.DISCONNECTED.value:
+        if acc is None or not acc.session_path or acc.status in (
+            AccountStatus.DISCONNECTED.value,
+            AccountStatus.AUTH_REQUIRED.value,
+            AccountStatus.BANNED_OR_RESTRICTED.value,
+        ):
             return
         try:
             client = await asyncio.wait_for(cm.connect(acc), timeout=CONNECT_TIMEOUT)
@@ -444,7 +517,20 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
             except Exception as reconnect_exc:
                 logger.error("discover_account(%s) reconnect also failed: %s", account.id, reconnect_exc)
                 return
-        if not client.is_connected() or not await asyncio.wait_for(client.is_user_authorized(), timeout=CONNECT_TIMEOUT):
+        if not client.is_connected():
+            return
+        auth_state = await astate.check_authorization(client, acc.id, timeout=CONNECT_TIMEOUT)
+        if auth_state == "transient":
+            logger.warning("discover_account(%s) auth check transient — skipping discovery cycle", account.id)
+            return
+        if auth_state == "unauthorized":
+            logger.error("discover_account(%s) confirmed session revocation — marking AUTH_REQUIRED", account.id)
+            db.close()
+            await cm.mark_account_auth_required(
+                acc.id, drop_session=False,
+                reason="confirmed session revocation (discovery)",
+                source=astate.SOURCE_DISCOVERY,
+            )
             return
         await _maybe_update_identity(acc, client)
         monitor = StoryMonitor(client, acc, db)
@@ -609,14 +695,18 @@ async def _discover_account(account: TelegramAccount, cfg: dict) -> None:
         logger.error("discover_account(%s) AuthKeyDuplicatedError — session invalidated by IP change, marking AUTH_REQUIRED", account.id)
         db.close()
         try:
-            await cm.mark_account_auth_required(account.id, drop_session=True)
+            await cm.mark_account_auth_required(account.id, drop_session=True,
+                                                reason="auth key duplicated (discovery)",
+                                                exc=exc, source=astate.SOURCE_DISCOVERY)
         except Exception:
             pass
     except (AuthKeyUnregisteredError, UnauthorizedError) as exc:
         logger.error("discover_account(%s) session unregistered — marking AUTH_REQUIRED", account.id)
         db.close()
         try:
-            await cm.mark_account_auth_required(account.id, drop_session=False)
+            await cm.mark_account_auth_required(account.id, drop_session=False,
+                                                reason="session unregistered (discovery)",
+                                                exc=exc, source=astate.SOURCE_DISCOVERY)
         except Exception:
             pass
     except Exception as exc:  # noqa: BLE001

@@ -204,6 +204,7 @@ async def run() -> None:
     consecutive_errors = 0
     discovery_task: asyncio.Task | None = None
     discovery_started: float | None = None
+    last_drain_busy = False
 
     # VPN IP monitor: detect IP changes and proactively disconnect clients.
     from ..config import get_settings
@@ -267,7 +268,25 @@ async def run() -> None:
         # 1) Drain the view queue FIRST — this is time-sensitive (stories expire).
         try:
             t0 = time.monotonic()
+            # Serialize against a still-running discovery BEFORE draining: both
+            # use the same Telethon clients, and two coroutines touching one
+            # session concurrently is exactly what caused "database is locked"
+            # worker errors (Sep 12/13 incidents). Drain is time-sensitive, so
+            # discovery is also only *started* after a quiet drain cycle below.
+            if discovery_task is not None and not discovery_task.done():
+                try:
+                    await asyncio.wait_for(discovery_task, timeout=DISCOVERY_WRAP_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.critical("discovery task still running at drain time — cancelling stale task")
+                    discovery_task.cancel()
+                    try:
+                        await discovery_task
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                    discovery_task = None
+                    discovery_started = None
             processed = await queue_worker.run_once()
+            last_drain_busy = bool(processed)
             elapsed = time.monotonic() - t0
             if elapsed > 2 or processed:
                 logger.info("queue_worker: processed=%s elapsed=%.1fs", processed, elapsed)
@@ -328,10 +347,19 @@ async def run() -> None:
         else:
             _mark_cycle()
 
-        # 5) Global story discovery — run as a background task so it doesn't
-        #    block queue processing (discovery can take minutes due to
-        #    FloodWait from Telegram's SearchPosts rate limit).
-        if discovery_task is not None and not discovery_task.done():
+        # 5) Global story discovery — background task so it doesn't block queue
+        #    processing (discovery can take minutes due to FloodWait from
+        #    Telegram's SearchPosts rate limit).  It is only STARTED after a
+        #    drain cycle that found no pending work: while the queue is busy the
+        #    clients are needed for viewing, so discovery waits (and the drain
+        #    below never has to race the discovery coroutine for a session).
+        if last_drain_busy:
+            if discovery_task is not None and not discovery_task.done():
+                logger.debug("queue busy — discovery deferred until a quiet cycle")
+            else:
+                discovery_task = None
+                discovery_started = None
+        elif discovery_task is not None and not discovery_task.done():
             # Stale-task protection: a discovery that outlives
             # DISCOVERY_WRAP_TIMEOUT is almost certainly hung on dead telethon
             # awaits. Without cancelling it, the ``done()`` guard below would

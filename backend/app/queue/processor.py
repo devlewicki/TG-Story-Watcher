@@ -31,6 +31,7 @@ from ..models import (
     TelegramAccount,
 )
 from ..services import activity
+from ..services import account_state as astate
 from ..services.settings_service import SettingsService
 
 logger = logging.getLogger("storywatcher.queue")
@@ -38,6 +39,17 @@ logger = logging.getLogger("storywatcher.queue")
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """True when the exception is a confirmed Telegram session revocation.
+
+    Used to surface auth-key failures out of the per-item handlers (which would
+    otherwise just leave a FAILED item) so the worker can flip the account to
+    AUTH_REQUIRED instead of silently dying while everything keeps failing.
+    """
+    category, _drop = astate.classify_telegram_error(exc)
+    return category in (astate.AUTH_DUPLICATED, astate.AUTH_UNREGISTERED)
 
 
 async def process_queue_item(
@@ -128,7 +140,7 @@ async def process_queue_item(
 
     peer = None
     try:
-        peer = await asyncio.wait_for(_resolve_peer(client, story.peer_id), timeout=RPC_TIMEOUT)
+        peer = await asyncio.wait_for(_resolve_peer(client, story.peer_id, account.id), timeout=RPC_TIMEOUT)
     except asyncio.TimeoutError:
         queue_item.status = "FAILED"
         queue_item.error = f"peer resolve timed out (peer={story.peer_id})"
@@ -140,6 +152,8 @@ async def process_queue_item(
         queue_item.error = f"peer not found: {exc}"
         queue_item.completed_at = _now()
         db.commit()
+        if _is_auth_error(exc):
+            raise
         return {"status": "FAILED", "error": queue_item.error}
     if peer is None:
         queue_item.status = "FAILED"
@@ -184,6 +198,8 @@ async def process_queue_item(
         queue_item.error = str(exc)[:500]
         queue_item.completed_at = _now()
         db.commit()
+        if _is_auth_error(exc):
+            raise
         return {"status": "FAILED", "error": queue_item.error}
 
     # Optional auto-like: react to the story with the configured emoji.
@@ -244,14 +260,44 @@ async def process_queue_item(
     return {"status": "VIEWED"}
 
 
-async def _resolve_peer(client, peer_id: int):
+async def _resolve_peer(client, peer_id: int, account_id: int | None = None):
     """Resolve a peer id to an InputPeer object.
 
     Raises on failure — the caller marks the queue item FAILED with the error.
     Previously this fell back to returning the raw int, which produced a
     cryptic TypeError when passed to IncrementStoryViewsRequest.
+
+    Defence-in-depth: after a fresh (re-)login a session file may not contain
+    the entity yet (the Oct 01 incident: 22 items FAILED with peer not found).
+    On a resolution miss we refresh the contact cache once and retry before
+    giving up, so a worker that starts right after a login heals itself.
     """
-    peer = await client.get_input_entity(peer_id)
+    try:
+        peer = await client.get_input_entity(peer_id)
+    except Exception:  # noqa: BLE001
+        # Bounded lazy retry: one contacts refresh, one attempt.
+        await _refresh_contacts(client, account_id)
+        peer = await client.get_input_entity(peer_id)
     if peer is None:
         raise RuntimeError(f"could not resolve peer id {peer_id}")
     return peer
+
+
+async def _refresh_contacts(client, account_id: int | None = None) -> None:
+    """Best-effort refresh of the entity cache (bounded, never raises)."""
+    from telethon import functions
+    from telethon.errors import RPCError
+
+    try:
+        await asyncio.wait_for(
+            client(functions.contacts.GetContactsRequest(hash=0)),
+            timeout=RPC_TIMEOUT,
+        )
+    except (RPCError, asyncio.TimeoutError, ConnectionError, OSError) as exc:
+        logger.warning(
+            "entity cache refresh failed%s: %s",
+            f" (account={account_id})" if account_id else "",
+            exc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("entity cache refresh failed unexpectedly%s: %s", f" (account={account_id})" if account_id else "", exc)
