@@ -85,10 +85,10 @@ def run_auto_backup_check() -> None:
             # Apply retention after the backup thread completes.
             import time
 
-            for _ in range(3600):
-                from ...db import SessionLocal as _SL
-                from ..admin_models import BackupOperation
+            from ...db import SessionLocal as _SL
+            from ...admin_models import BackupOperation
 
+            for _ in range(3600):
                 _db = _SL()
                 try:
                     op = _db.get(BackupOperation, op_id)
