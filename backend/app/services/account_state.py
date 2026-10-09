@@ -249,10 +249,12 @@ async def check_authorization(client, account_id: int, timeout: float = DEFAULT_
     counts as ``unauthorized``; anything reachability-flavoured goes to
     ``transient`` and is retried on a bounded per-account backoff instead of
     killing the account.
+
+    A client whose session carries no registered auth key is detected by the
+    probe itself (Telethon raises ``AuthKeyUnregisteredError``), so no separate
+    pre-check is needed — and crucially ``is_user_authorized()`` must NOT be
+    trusted here because it collapses transient errors into ``False``.
     """
-    if not client.has_authorization():
-        # Session has no auth key at all -> nothing to fall back on.
-        return "unauthorized"
     if in_transient_backoff(account_id):
         return "transient"
     from telethon import functions

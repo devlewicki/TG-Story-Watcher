@@ -630,7 +630,7 @@ async def _warm_entity_cache(client, account) -> None:
     try:
         if not client.is_connected():
             await client.connect()
-        if not client.has_authorization():
+        if not await client.is_user_authorized():
             return
         await asyncio.wait_for(
             client(functions.contacts.GetContactsRequest(hash=0)),

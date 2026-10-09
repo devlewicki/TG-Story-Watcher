@@ -13,7 +13,9 @@ Covers the two documented incidents:
 
 These tests are built on exception *messages* (not isinstance) so they pass
 whether or not :mod:`telethon` is installed — ``classify_telegram_error`` falls
-back to message matching on both.
+back to message matching on both.  A few tests intentionally exercise the real
+Telethon API surface (``TelegramClient.is_user_authorized``, error classes) to
+pin that the code never calls a method TelegramClient does not implement.
 """
 from __future__ import annotations
 
@@ -214,18 +216,24 @@ def test_transient_backoff_bounds_retries():
 # check_authorization: confirmed loss vs transient blip
 # --------------------------------------------------------------------------
 
-def _fake_client(has_auth=True, users_result=None, raise_exc=None):
+def _fake_client(users_result=None, raise_exc=None):
     async def _call(request, *a, **kw):
         if raise_exc is not None:
             raise raise_exc
         return users_result
 
-    FakeClient = type(
-        "FakeClient",
-        (),
-        {"has_authorization": lambda self: has_auth, "__call__": _call},
-    )
+    # Deliberately exposes only the real Telethon call surface: a regression
+    # that calls ``client.has_authorization()`` (which TelegramClient does not
+    # implement) will raise AttributeError here.
+    FakeClient = type("FakeClient", (), {"__call__": _call})
     return FakeClient()
+
+
+def test_telegram_client_api_surface():
+    from telethon import TelegramClient
+
+    assert hasattr(TelegramClient, "is_user_authorized")
+    assert not hasattr(TelegramClient, "has_authorization")
 
 
 def test_check_authorization_authorized(db):
@@ -242,7 +250,9 @@ def test_check_authorization_authorized(db):
 
 
 def test_check_authorization_no_key_is_unauthorized(db):
-    client = _fake_client(has_auth=False)
+    from telethon.errors import AuthKeyUnregisteredError
+
+    client = _fake_client(raise_exc=AuthKeyUnregisteredError(request=None))
     state = asyncio.run(astate.check_authorization(client, 1))
     assert state == "unauthorized"
 
@@ -277,6 +287,32 @@ def test_check_authorization_transient_error_sets_backoff(db):
         assert astate.in_transient_backoff(1) is True
     finally:
         astate.reset_for_tests()
+
+
+def test_warm_entity_cache_uses_real_telethon_api():
+    from app.telegram import client_manager as cm
+
+    seen = []
+
+    class _Warm:
+        # Only the real TelegramClient surface: no has_authorization().
+        def is_connected(self):
+            return True
+
+        async def connect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def __call__(self, request):
+            seen.append(request)
+            return []
+
+        session = SimpleNamespace(_entities={1: 1, 2: 2})
+
+    asyncio.run(cm._warm_entity_cache(_Warm(), SimpleNamespace(id=7)))
+    assert len(seen) == 1, "contacts request must be issued"
 
 
 # --------------------------------------------------------------------------
